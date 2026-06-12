@@ -79,6 +79,7 @@ export component TerminalView inherits Rectangle {
     in property <bool>   is-alt-screen;
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
+    in property <bool> moba-mode: false;
 
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
@@ -213,11 +214,43 @@ export component TerminalView inherits Rectangle {
         }
     }
 
+    HorizontalLayout {
+        spacing: 0;
+
+        if root.moba-mode : SftpPanel {
+            width: 280px;
+            moba-mode:     true;
+            collapsed:     false;
+            current-path:  root.sftp-path;
+            entries:       root.sftp-entries;
+            status:        root.sftp-status;
+            loading:       root.sftp-loading;
+            tree-nodes:    root.sftp-tree-nodes;
+            toggle-collapsed => { }
+            navigate(path)      => { root.sftp-navigate(path); }
+            download(path)      => { root.sftp-download(path); }
+            upload-clicked(dir, folder) => { root.sftp-upload-clicked(dir, folder); }
+            refresh(path)       => { root.sftp-refresh(path); }
+            tree-expand(path)   => { root.sftp-tree-expand(path); }
+            delete(path)        => { root.sftp-delete(path); }
+            view(path)          => { root.sftp-view(path); }
+            edit(path)          => { root.sftp-edit(path); }
+            open-external(path) => { root.sftp-open-external(path); }
+            edit-external(path) => { root.sftp-edit-external(path); }
+            rename-request(path, name) => { root.sftp-rename-request(path, name); }
+            chmod-request(path, name, mode) => { root.sftp-chmod-request(path, name, mode); }
+            copy-path(path)     => { root.sftp-copy-path(path); }
+            new-folder(dir)     => { root.sftp-new-folder(dir); }
+            new-file(dir)       => { root.sftp-new-file(dir); }
+        }
+
     VerticalLayout {
         spacing: 0;
+        horizontal-stretch: 1;
 
         // --- Status strip ---------------------------------------------------
         Rectangle {
+            visible: !root.moba-mode;
             height: 24px;
             background: Theme.bg-panel-alt;
             HorizontalLayout {
@@ -622,6 +655,7 @@ export component TerminalView inherits Rectangle {
 
         // --- Drag handle ----------------------------------------------------
         Rectangle {
+            visible: !root.moba-mode;
             height: 4px;
             background: divider-ta.has-hover || root.sftp-dragging
                 ? Theme.accent
@@ -654,6 +688,7 @@ export component TerminalView inherits Rectangle {
 
         // --- SFTP panel -----------------------------------------------------
         SftpPanel {
+            visible: !root.moba-mode;
             height: root.sftp-panel-height;
             collapsed:     root.sftp-collapsed;
             current-path:  root.sftp-path;
@@ -689,5 +724,21 @@ export component TerminalView inherits Rectangle {
             new-folder(dir)     => { root.sftp-new-folder(dir); }
             new-file(dir)       => { root.sftp-new-file(dir); }
         }
+
+        if root.moba-mode : Rectangle {
+            height: 28px;
+            background: #eeeeee;
+            border-width: 1px;
+            border-color: #cfd8e3;
+            HorizontalLayout {
+                padding-left: 8px;
+                spacing: 14px;
+                Text { text: root.status-line; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                Text { text: "CPU 0%"; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
+                Text { text: "0.00 Mb/s"; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
+                Text { text: root.sftp-path; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
+            }
+        }
+    }
     }
 }

@@ -235,6 +235,9 @@ pub struct ConfigFile {
     /// Theme preference: "system" (default) | "dark" | "light".
     #[serde(default)]
     pub theme_pref: String,
+    /// UI layout theme: "finalshell" (default) | "mobaxterm".
+    #[serde(default)]
+    pub ui_theme: String,
     /// Terminal font family. Empty = the built-in default (Cascadia Mono).
     #[serde(default)]
     pub font_family: String,
@@ -473,6 +476,23 @@ impl ConfigStore {
 
     pub fn set_theme_pref(&mut self, pref: String) {
         self.cache.theme_pref = pref;
+    }
+
+    /// UI layout theme: "finalshell" (default) | "mobaxterm".
+    pub fn ui_theme(&self) -> &str {
+        if self.cache.ui_theme == "mobaxterm" {
+            "mobaxterm"
+        } else {
+            "finalshell"
+        }
+    }
+
+    pub fn set_ui_theme(&mut self, theme: String) {
+        self.cache.ui_theme = if theme == "mobaxterm" {
+            "mobaxterm".to_string()
+        } else {
+            "finalshell".to_string()
+        };
     }
 
     /// Terminal font family ("" = built-in default).

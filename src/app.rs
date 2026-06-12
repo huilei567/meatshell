@@ -214,6 +214,7 @@ pub fn run() -> Result<()> {
         };
         window.set_dark_mode(is_dark);
     }
+    window.set_ui_theme(store.borrow().ui_theme().into());
 
     // Apply the saved terminal font (Interface settings). An empty family keeps
     // the built-in default; the size always applies (defaults to 13).
@@ -251,6 +252,27 @@ pub fn run() -> Result<()> {
             let mut s = store.borrow_mut();
             s.set_sftp_follow_cd(follow);
             let _ = s.save();
+        });
+    }
+
+    // Interface settings: switch between FinalShell and MobaXterm layouts.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_ui_theme(move |theme: SharedString| {
+            let theme = if theme.as_str() == "mobaxterm" {
+                "mobaxterm"
+            } else {
+                "finalshell"
+            };
+            {
+                let mut s = store.borrow_mut();
+                s.set_ui_theme(theme.to_string());
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_ui_theme(theme.into());
+            }
         });
     }
 

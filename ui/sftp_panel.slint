@@ -57,6 +57,7 @@ export component SftpPanel inherits Rectangle {
     in property <bool>    loading: false;
     in property <[SftpTreeNode]> tree-nodes: [];
     in property <bool> collapsed: false;   // when true only the toolbar shows
+    in property <bool> moba-mode: false;   // compact MobaXterm-style current-directory list
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
@@ -249,8 +250,182 @@ export component SftpPanel inherits Rectangle {
             }
         }
 
-        // --- Main area: tree (left) + file list (right) --------------------
-        HorizontalLayout {
+        if root.moba-mode : VerticalLayout {
+            vertical-stretch: 1;
+            spacing: 0;
+
+            Rectangle {
+                height: 22px;
+                background: Theme.bg-root;
+                HorizontalLayout {
+                    padding-left: 10px;
+                    padding-right: 8px;
+                    spacing: 6px;
+                    Text {
+                        text: "\u{E5D8}";
+                        font-family: "Material Icons";
+                        color: Theme.accent;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: @tr("Name");
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Theme.border-subtle; }
+
+            moba-file-area := Rectangle {
+                vertical-stretch: 1;
+                clip: true;
+                background: Theme.bg-panel;
+
+                ScrollView {
+                    width: parent.width;
+                    height: parent.height;
+                    viewport-width: self.visible-width;
+                    viewport-height: max(self.visible-height, moba-file-list.preferred-height);
+
+                    moba-file-list := VerticalLayout {
+                        spacing: 0;
+
+                        if root.loading : Rectangle {
+                            height: 40px;
+                            Text {
+                                text: @tr("Loading...");
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        if !root.loading && root.entries.length == 0 : Rectangle {
+                            height: 40px;
+                            Text {
+                                text: @tr("Empty directory");
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-sm;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        for entry[i] in root.entries : moba-row := Rectangle {
+                            height: 25px;
+                            background: i == root.selected-row
+                                ? #4a90e240
+                                : (moba-row-ta.has-hover
+                                    ? #4a90e225
+                                    : transparent);
+
+                            moba-row-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.selected-row = i; }
+                                double-clicked => {
+                                    if (entry.is-dir) {
+                                        root.navigate(entry.full-path);
+                                    } else {
+                                        root.download(entry.full-path);
+                                    }
+                                }
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down
+                                            && ev.button == PointerEventButton.right) {
+                                        root.selected-row = i;
+                                        root.menu-target = entry.full-path;
+                                        root.menu-target-name = entry.name;
+                                        root.menu-target-is-dir = entry.is-dir;
+                                        root.menu-target-mode = entry.mode;
+                                        root.menu-x = self.absolute-position.x + self.mouse-x - moba-file-area.absolute-position.x;
+                                        root.menu-y = self.absolute-position.y + self.mouse-y - moba-file-area.absolute-position.y;
+                                        moba-file-menu.show();
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 8px;
+                                Text {
+                                    width: 20px;
+                                    text: entry.is-dir ? "\u{E2C7}" : "\u{E24D}";
+                                    font-family: "Material Icons";
+                                    color: entry.is-dir ? #d6a436 : Theme.text-muted;
+                                    font-size: Theme.fs-md;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: entry.name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            vertical-stretch: 1;
+                            min-height: 24px;
+                            moba-ws-ta := TouchArea {
+                                pointer-event(ev) => {
+                                    if (ev.kind == PointerEventKind.down
+                                            && ev.button == PointerEventButton.right) {
+                                        root.selected-row = -1;
+                                        root.menu-target = "";
+                                        root.menu-x = self.absolute-position.x + self.mouse-x - moba-file-area.absolute-position.x;
+                                        root.menu-y = self.absolute-position.y + self.mouse-y - moba-file-area.absolute-position.y;
+                                        moba-file-menu.show();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                moba-file-menu := PopupWindow {
+                    x: root.menu-x;
+                    y: root.menu-y;
+                    width: 148px;
+                    height: 12 * 27px + 8px;
+                    Rectangle {
+                        background: Theme.bg-panel;
+                        border-radius: Theme.radius-sm;
+                        border-width: 1px;
+                        border-color: Theme.border-strong;
+                        drop-shadow-blur: 12px;
+                        drop-shadow-color: #00000060;
+                        VerticalLayout {
+                            padding: 4px;
+                            spacing: 1px;
+                            SftpMenuItem { label: @tr("Download"); enabled: root.menu-target != ""; clicked => { root.download(root.menu-target); } }
+                            SftpMenuItem { label: @tr("View"); enabled: root.menu-target != "" && !root.menu-target-is-dir; clicked => { root.view(root.menu-target); } }
+                            SftpMenuItem { label: @tr("Edit"); enabled: root.menu-target != "" && !root.menu-target-is-dir; clicked => { root.edit(root.menu-target); } }
+                            SftpMenuItem { label: @tr("Open externally"); enabled: root.menu-target != "" && !root.menu-target-is-dir; clicked => { root.open-external(root.menu-target); } }
+                            SftpMenuItem { label: @tr("Edit externally"); enabled: root.menu-target != "" && !root.menu-target-is-dir; clicked => { root.edit-external(root.menu-target); } }
+                            SftpMenuItem { label: @tr("Rename"); enabled: root.menu-target != ""; clicked => { root.rename-request(root.menu-target, root.menu-target-name); } }
+                            SftpMenuItem { label: @tr("Permissions"); enabled: root.menu-target != ""; clicked => { root.chmod-request(root.menu-target, root.menu-target-name, root.menu-target-mode); } }
+                            SftpMenuItem { label: @tr("Copy path"); enabled: root.menu-target != ""; clicked => { root.copy-path(root.menu-target); } }
+                            SftpMenuItem { label: @tr("Delete"); tint: #d86c6c; enabled: root.menu-target != ""; clicked => { root.delete(root.menu-target); } }
+                            Rectangle { height: 1px; background: Theme.border-subtle; }
+                            SftpMenuItem { label: @tr("New folder"); clicked => { root.new-folder(root.current-path); } }
+                            SftpMenuItem { label: @tr("New file"); clicked => { root.new-file(root.current-path); } }
+                            SftpMenuItem { label: @tr("Refresh"); clicked => { root.refresh(root.current-path); } }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !root.moba-mode : HorizontalLayout {
             vertical-stretch: 1;
             spacing: 0;
 

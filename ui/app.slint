@@ -102,6 +102,9 @@ export component AppWindow inherits Window {
     in-out property <string> term-font-family <=> Theme.term-font-family;
     in-out property <length> term-font-size <=> Theme.term-font-size;
     in-out property <string> ui-font-family <=> Theme.ui-font-family;
+    in-out property <string> ui-theme: "finalshell";
+    property <bool> moba-mode: ui-theme == "mobaxterm";
+    in-out property <string> moba-search;
     in property <[string]> term-fonts;             // installed monospace families
     in-out property <bool> interface-open: false;  // Interface settings dialog
     // Interface dialog position (draggable by its title bar); init centered.
@@ -112,7 +115,8 @@ export component AppWindow inherits Window {
     property <length> ifd-base-y;
     property <length> ifd-grab-x;
     property <length> ifd-grab-y;
-    property <string> ifd-page: "font";   // active Interface page: "font" | "sftp"
+    property <string> ifd-page: "theme";  // active Interface page: "theme" | "font" | "sftp"
+    callback set-ui-theme(string);                 // apply + persist UI layout theme
     callback set-term-font(string);                // apply + persist font family
     callback set-term-font-size(int);              // apply + persist font size (px)
     // SFTP follows the terminal's cd; opt out in Interface settings.
@@ -284,12 +288,194 @@ export component AppWindow inherits Window {
     callback term-select-end(string /* tab-id */);
     callback term-select-autoscroll(string /* tab-id */, int /* dir */);
 
+    if root.moba-mode : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: 98px;
+        z: 0;
+        background: Theme.bg-panel;
+        Rectangle {
+            width: parent.width;
+            height: 28px;
+            background: Theme.bg-panel-alt;
+            HorizontalLayout {
+                padding-left: 6px;
+                spacing: 18px;
+                Text { text: "Terminal"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "Sessions"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "View"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "X server"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "Tools"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "Settings"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Text { text: "Help"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+        Rectangle {
+            y: 28px;
+            width: parent.width;
+            height: 70px;
+            background: Theme.bg-panel;
+            HorizontalLayout {
+                padding-left: 14px;
+                padding-right: 12px;
+                spacing: 14px;
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    background: moba-new-session-ta.has-hover ? Theme.bg-hover : transparent;
+                    border-radius: 3px;
+                    moba-new-session-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.new-session-clicked(); }
+                    }
+                    Text { y: 8px; width: parent.width; text: "\u{E8F9}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Session"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    Text { y: 8px; width: parent.width; text: "\u{E8D5}"; font-family: "Material Icons"; color: #f2c200; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Sessions"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    Text { y: 8px; width: parent.width; text: "\u{E8F0}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "View"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    Text { y: 8px; width: parent.width; text: "\u{E8D4}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Split"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    Text { y: 8px; width: parent.width; text: "\u{E875}"; font-family: "Material Icons"; color: #00a0b0; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Servers"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    background: moba-settings-ta.has-hover ? Theme.bg-hover : transparent;
+                    border-radius: 3px;
+                    moba-settings-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.settings-open = true;
+                            root.download-open = false;
+                        }
+                    }
+                    Text { y: 8px; width: parent.width; text: "\u{E8B8}"; font-family: "Material Icons"; color: #1e88e5; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Settings"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    Text { y: 8px; width: parent.width; text: "\u{E887}"; font-family: "Material Icons"; color: #1e88e5; font-size: 23px; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "Help"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text { text: "meatshell"; color: Theme.text-primary; font-size: Theme.fs-lg; vertical-alignment: center; }
+            }
+        }
+    }
+
     HorizontalLayout {
+        y: root.moba-mode ? 98px : 0px;
+        height: parent.height - (root.moba-mode ? 98px : 0px);
         spacing: 0;
+
+        if root.moba-mode && root.active-tab-id == "welcome" : Rectangle {
+            width: root.sidebar-collapsed ? 0px : 286px;
+            clip: true;
+            background: Theme.bg-panel;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            animate width { duration: 150ms; easing: ease-out; }
+            VerticalLayout {
+                spacing: 0;
+                Rectangle {
+                    height: 31px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    background: Theme.bg-root;
+                    TextInput {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        text <=> root.moba-search;
+                        color: Theme.text-primary;
+                        font-size: Theme.fs-sm;
+                        single-line: true;
+                    }
+                    if root.moba-search == "" : Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        height: parent.height;
+                        text: "Quick connect...";
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+                }
+                Rectangle {
+                    height: 30px;
+                    background: Theme.bg-panel-alt;
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        spacing: 8px;
+                        Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: #1976d2; font-size: Theme.fs-md; vertical-alignment: center; }
+                        Text { text: "User sessions"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; horizontal-stretch: 1; }
+                    }
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+                    VerticalLayout {
+                        padding-top: 6px;
+                        spacing: 1px;
+                        if root.sessions.length == 0 : Text {
+                            text: "No saved sessions";
+                            color: Theme.text-muted;
+                            font-size: Theme.fs-sm;
+                            horizontal-alignment: center;
+                        }
+                        for session[i] in root.sessions : Rectangle {
+                            visible: session.id != "" && !session.collapsed;
+                            height: self.visible ? 26px : 0px;
+                            background: moba-session-ta.has-hover ? Theme.bg-hover : transparent;
+                            moba-session-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.connect-session(session.id); }
+                            }
+                            HorizontalLayout {
+                                padding-left: 26px;
+                                padding-right: 8px;
+                                spacing: 6px;
+                                Text { text: "\u{E897}"; font-family: "Material Icons"; color: #d4a900; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                Text {
+                                    text: session.name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Left sidebar — collapsible (width animates to 0).
         Sidebar {
-            width: root.sidebar-collapsed ? 0px : 220px;
+            width: root.moba-mode ? 0px : (root.sidebar-collapsed ? 0px : 220px);
+            visible: !root.moba-mode;
             clip: true;
             animate width { duration: 150ms; easing: ease-out; }
             connection-state: root.connection-state;
@@ -323,7 +509,8 @@ export component AppWindow inherits Window {
                 spacing: 0;
                 // Sidebar collapse / expand toggle.
                 Rectangle {
-                    width: 30px;
+                    width: root.moba-mode ? 0px : 30px;
+                    visible: !root.moba-mode;
                     background: sb-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
                     sb-ta := TouchArea {
                         mouse-cursor: pointer;
@@ -340,6 +527,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 TabBar {
+                    height: root.moba-mode ? 30px : 36px;
                     horizontal-stretch: 1;
                     tabs: root.tabs;
                     active-id: root.active-tab-id;
@@ -355,10 +543,10 @@ export component AppWindow inherits Window {
             // Content area swaps based on active tab kind.
             Rectangle {
                 vertical-stretch: 1;
-                background: Theme.bg-root;
+                background: root.moba-mode ? Theme.bg-panel : Theme.bg-root;
 
                 // Welcome tab
-                if root.active-tab-id == "welcome" : Welcome {
+                if root.active-tab-id == "welcome" && !root.moba-mode : Welcome {
                     sessions: root.sessions;
                     import-hint: root.ssh-import-hint;
                     new-session => { root.new-session-clicked(); }
@@ -382,6 +570,133 @@ export component AppWindow inherits Window {
                     remove-session(id) => { root.remove-session(id); }
                 }
 
+                if root.active-tab-id == "welcome" && root.moba-mode : Rectangle {
+                    background: Theme.bg-panel;
+                    Rectangle {
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2 - 70px;
+                        width: 720px;
+                        height: 300px;
+
+                        HorizontalLayout {
+                            y: 0px;
+                            height: 72px;
+                            spacing: 18px;
+                            alignment: center;
+                            Image {
+                                width: 58px;
+                                height: 58px;
+                                source: @image-url("../assets/icon.png");
+                            }
+                            Text { text: "meatshell"; color: Theme.text-primary; font-size: 38px; vertical-alignment: center; }
+                        }
+
+                        HorizontalLayout {
+                            y: 96px;
+                            height: 32px;
+                            spacing: 140px;
+                            alignment: center;
+                            Rectangle {
+                                width: 240px;
+                                height: 32px;
+                                border-width: 1px;
+                                border-color: #1976d2;
+                                background: start-local-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
+                                start-local-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.new-tab-clicked(); }
+                                }
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 8px;
+                                    Text { text: "\u{E147}"; font-family: "Material Icons"; color: #34a853; font-size: Theme.fs-md; vertical-alignment: center; }
+                                    Text { text: "Start local terminal"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
+                                }
+                            }
+                            Rectangle {
+                                width: 240px;
+                                height: 32px;
+                                border-width: 1px;
+                                border-color: Theme.border-subtle;
+                                background: Theme.bg-panel;
+                                HorizontalLayout {
+                                    alignment: center;
+                                    spacing: 8px;
+                                    Text { text: "\u{E5D5}"; font-family: "Material Icons"; color: #00acc1; font-size: Theme.fs-md; vertical-alignment: center; }
+                                    Text { text: "Recover previous sessions"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            x: 135px;
+                            y: 144px;
+                            width: 450px;
+                            height: 30px;
+                            border-width: 1px;
+                            border-color: Theme.border-strong;
+                            background: Theme.bg-root;
+                            TextInput {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text <=> root.moba-search;
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-md;
+                                single-line: true;
+                            }
+                            if root.moba-search == "" : Text {
+                                x: 8px;
+                                width: parent.width - 16px;
+                                height: parent.height;
+                                text: "Find existing session or server name...";
+                                color: Theme.text-muted;
+                                font-size: Theme.fs-md;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        Rectangle {
+                            x: 70px;
+                            y: 190px;
+                            width: 580px;
+                            height: 96px;
+                            background: Theme.bg-panel-alt;
+                            Text {
+                                y: 10px;
+                                width: parent.width;
+                                text: "Recent sessions";
+                                color: Theme.text-primary;
+                                font-size: Theme.fs-md;
+                                font-weight: 700;
+                                horizontal-alignment: center;
+                            }
+                            HorizontalLayout {
+                                x: 22px;
+                                y: 42px;
+                                width: parent.width - 44px;
+                                spacing: 28px;
+                                for session[i] in root.sessions : Text {
+                                    visible: session.id != "" && i < 6;
+                                    text: "\u{E897} " + session.name;
+                                    color: Theme.text-primary;
+                                    font-size: Theme.fs-sm;
+                                    max-width: 160px;
+                                    overflow: elide;
+                                }
+                            }
+                            Text {
+                                y: 72px;
+                                width: parent.width;
+                                text: "CygUtils plugin not found on your system.";
+                                color: #0000aa;
+                                font-size: Theme.fs-sm;
+                                horizontal-alignment: center;
+                            }
+                        }
+                    }
+                }
+
                 // Terminal tabs — one TerminalView per terminal state. Only
                 // the one matching `active-tab-id` is visible. Slint doesn't
                 // allow nesting `if` directly inside a `for`, so we toggle
@@ -397,6 +712,7 @@ export component AppWindow inherits Window {
                     cursor-col: term.cursor-col;
                     rows-used: term.rows-used;
                     is-alt-screen: term.is-alt-screen;
+                    moba-mode: root.moba-mode;
                     find-matches: term.find-matches;
                     selection: term.selection;
                     sftp-panel-height <=> root.sftp-panel-height;
@@ -467,7 +783,7 @@ export component AppWindow inherits Window {
     // Settings (gear) — far right.
     Rectangle {
         x: root.width - 34px;
-        y: 8px;
+        y: root.moba-mode ? 56px : 8px;
         width: 26px;
         height: 26px;
         border-radius: Theme.radius-sm;
@@ -491,7 +807,7 @@ export component AppWindow inherits Window {
     // Download manager — left of settings.
     Rectangle {
         x: root.width - 64px;
-        y: 8px;
+        y: root.moba-mode ? 56px : 8px;
         width: 26px;
         height: 26px;
         border-radius: Theme.radius-sm;
@@ -516,7 +832,7 @@ export component AppWindow inherits Window {
     //               moon = currently light → click for dark) — left of download.
     Rectangle {
         x: root.width - 94px;
-        y: 8px;
+        y: root.moba-mode ? 56px : 8px;
         width: 26px;
         height: 26px;
         border-radius: Theme.radius-sm;
@@ -1460,6 +1776,25 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 height: 30px;
                                 border-radius: Theme.radius-sm;
+                                background: root.ifd-page == "theme"
+                                    ? Theme.bg-active
+                                    : (nav-theme-ta.has-hover ? Theme.bg-hover : transparent);
+                                nav-theme-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.ifd-page = "theme"; }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 10px; spacing: 8px;
+                                    Text { text: "\u{E3A8}"; font-family: "Material Icons";
+                                           color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Theme" : "主题";
+                                           color: Theme.text-primary; font-size: Theme.fs-md;
+                                           vertical-alignment: center; horizontal-stretch: 1; }
+                                }
+                            }
+                            Rectangle {
+                                height: 30px;
+                                border-radius: Theme.radius-sm;
                                 background: root.ifd-page == "font"
                                     ? Theme.bg-active
                                     : (nav-font-ta.has-hover ? Theme.bg-hover : transparent);
@@ -1501,6 +1836,76 @@ export component AppWindow inherits Window {
                     Rectangle {
                         horizontal-stretch: 73;
                         background: Theme.bg-panel;
+                        if root.ifd-page == "theme" : VerticalLayout {
+                            padding: 18px;
+                            spacing: 12px;
+                            alignment: start;
+
+                            Text {
+                                text: root.lang-en ? "Interface theme" : "界面主题";
+                                color: Theme.text-secondary;
+                                font-size: Theme.fs-sm;
+                            }
+
+                            Rectangle {
+                                height: 58px;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: root.ui-theme == "finalshell" ? Theme.accent : Theme.border-subtle;
+                                background: finalshell-theme-ta.has-hover ? Theme.bg-hover
+                                    : (root.ui-theme == "finalshell" ? Theme.bg-active : Theme.bg-root);
+                                finalshell-theme-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.set-ui-theme("finalshell"); }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 14px; padding-right: 14px; spacing: 12px;
+                                    Text { text: "\u{E875}"; font-family: "Material Icons";
+                                           color: root.ui-theme == "finalshell" ? Theme.accent : Theme.text-secondary;
+                                           font-size: Theme.fs-lg; vertical-alignment: center; }
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        Text { text: "FinalShell"; color: Theme.text-primary; font-size: Theme.fs-md; font-weight: 600; }
+                                        Text { text: root.lang-en ? "Current meatshell layout" : "当前界面";
+                                               color: Theme.text-muted; font-size: Theme.fs-xs; }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: root.ui-theme == "finalshell" ? "\u{E5CA}" : "";
+                                           font-family: "Material Icons"; color: Theme.accent;
+                                           font-size: Theme.fs-md; vertical-alignment: center; }
+                                }
+                            }
+
+                            Rectangle {
+                                height: 58px;
+                                border-radius: Theme.radius-sm;
+                                border-width: 1px;
+                                border-color: root.ui-theme == "mobaxterm" ? Theme.accent : Theme.border-subtle;
+                                background: moba-theme-ta.has-hover ? Theme.bg-hover
+                                    : (root.ui-theme == "mobaxterm" ? Theme.bg-active : Theme.bg-root);
+                                moba-theme-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.set-ui-theme("mobaxterm"); }
+                                }
+                                HorizontalLayout {
+                                    padding-left: 14px; padding-right: 14px; spacing: 12px;
+                                    Text { text: "\u{E30A}"; font-family: "Material Icons";
+                                           color: root.ui-theme == "mobaxterm" ? Theme.accent : Theme.text-secondary;
+                                           font-size: Theme.fs-lg; vertical-alignment: center; }
+                                    VerticalLayout {
+                                        spacing: 3px;
+                                        Text { text: "MobaXterm"; color: Theme.text-primary; font-size: Theme.fs-md; font-weight: 600; }
+                                        Text { text: root.lang-en ? "Compact toolbar and session pane" : "紧凑工具栏与会话栏";
+                                               color: Theme.text-muted; font-size: Theme.fs-xs; }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                    Text { text: root.ui-theme == "mobaxterm" ? "\u{E5CA}" : "";
+                                           font-family: "Material Icons"; color: Theme.accent;
+                                           font-size: Theme.fs-md; vertical-alignment: center; }
+                                }
+                            }
+                        }
+
                         if root.ifd-page == "font" : VerticalLayout {
                             padding: 18px;
                             spacing: 14px;
