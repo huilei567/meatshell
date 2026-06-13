@@ -292,28 +292,16 @@ export component AppWindow inherits Window {
         x: 0px;
         y: 0px;
         width: parent.width;
-        height: 98px;
+        height: 70px;
         z: 0;
         background: Theme.bg-panel;
         Rectangle {
             width: parent.width;
-            height: 28px;
+            height: 0px;
             background: Theme.bg-panel-alt;
-            HorizontalLayout {
-                padding-left: 6px;
-                spacing: 18px;
-                Text { text: "Terminal"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "Sessions"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "View"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "X server"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "Tools"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "Settings"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Text { text: "Help"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; }
-                Rectangle { horizontal-stretch: 1; }
-            }
         }
         Rectangle {
-            y: 28px;
+            y: 0px;
             width: parent.width;
             height: 70px;
             background: Theme.bg-panel;
@@ -331,62 +319,82 @@ export component AppWindow inherits Window {
                         clicked => { root.new-session-clicked(); }
                     }
                     Text { y: 8px; width: parent.width; text: "\u{E8F9}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Session"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                    Text { y: 36px; width: parent.width; text: "会话"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
                 }
+                Rectangle { horizontal-stretch: 1; }
                 Rectangle {
                     width: 66px;
                     height: 58px;
-                    Text { y: 8px; width: parent.width; text: "\u{E8D5}"; font-family: "Material Icons"; color: #f2c200; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Sessions"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
-                }
-                Rectangle {
-                    width: 66px;
-                    height: 58px;
-                    Text { y: 8px; width: parent.width; text: "\u{E8F0}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "View"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
-                }
-                Rectangle {
-                    width: 66px;
-                    height: 58px;
-                    Text { y: 8px; width: parent.width; text: "\u{E8D4}"; font-family: "Material Icons"; color: #1976d2; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Split"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
-                }
-                Rectangle {
-                    width: 66px;
-                    height: 58px;
-                    Text { y: 8px; width: parent.width; text: "\u{E875}"; font-family: "Material Icons"; color: #00a0b0; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Servers"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
-                }
-                Rectangle {
-                    width: 66px;
-                    height: 58px;
-                    background: moba-settings-ta.has-hover ? Theme.bg-hover : transparent;
                     border-radius: 3px;
-                    moba-settings-ta := TouchArea {
+                    background: moba-theme-top-ta.has-hover ? Theme.bg-hover : transparent;
+                    moba-theme-top-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.toggle-theme(); }
+                    }
+                    Text {
+                        y: 8px;
+                        width: parent.width;
+                        text: Theme.dark ? "\u{E518}" : "\u{E51C}";
+                        font-family: "Material Icons";
+                        color: Theme.dark ? #f5c542 : #5856d6;
+                        font-size: 23px;
+                        horizontal-alignment: center;
+                    }
+                    Text { y: 36px; width: parent.width; text: Theme.dark ? "浅色" : "深色"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    border-radius: 3px;
+                    background: moba-dl-top-ta.has-hover || root.download-open ? Theme.bg-hover : transparent;
+                    moba-dl-top-ta := TouchArea {
                         mouse-cursor: pointer;
                         clicked => {
-                            root.settings-open = true;
+                            root.download-open = !root.download-open;
+                            root.settings-open = false;
+                        }
+                    }
+                    Text {
+                        y: 8px;
+                        width: parent.width;
+                        text: "\u{E2C4}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary;
+                        font-size: 23px;
+                        horizontal-alignment: center;
+                    }
+                    Text { y: 36px; width: parent.width; text: "下载"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                }
+                Rectangle {
+                    width: 66px;
+                    height: 58px;
+                    border-radius: 3px;
+                    background: moba-gear-top-ta.has-hover || root.settings-open ? Theme.bg-hover : transparent;
+                    moba-gear-top-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.settings-open = !root.settings-open;
                             root.download-open = false;
                         }
                     }
-                    Text { y: 8px; width: parent.width; text: "\u{E8B8}"; font-family: "Material Icons"; color: #1e88e5; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Settings"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
+                    Text {
+                        y: 8px;
+                        width: parent.width;
+                        text: "\u{E8B8}";
+                        font-family: "Material Icons";
+                        color: Theme.text-secondary;
+                        font-size: 23px;
+                        horizontal-alignment: center;
+                    }
+                    Text { y: 36px; width: parent.width; text: "设置"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
                 }
-                Rectangle {
-                    width: 66px;
-                    height: 58px;
-                    Text { y: 8px; width: parent.width; text: "\u{E887}"; font-family: "Material Icons"; color: #1e88e5; font-size: 23px; horizontal-alignment: center; }
-                    Text { y: 36px; width: parent.width; text: "Help"; color: Theme.text-primary; font-size: Theme.fs-xs; horizontal-alignment: center; }
-                }
-                Rectangle { horizontal-stretch: 1; }
-                Text { text: "meatshell"; color: Theme.text-primary; font-size: Theme.fs-lg; vertical-alignment: center; }
             }
         }
     }
 
     HorizontalLayout {
-        y: root.moba-mode ? 98px : 0px;
-        height: parent.height - (root.moba-mode ? 98px : 0px);
+        y: root.moba-mode ? 70px : 0px;
+        height: parent.height - (root.moba-mode ? 70px : 0px);
         spacing: 0;
 
         if root.moba-mode && root.active-tab-id == "welcome" : Rectangle {
@@ -721,6 +729,13 @@ export component AppWindow inherits Window {
                     sftp-status: term.sftp-status;
                     sftp-loading: term.sftp-loading;
                     sftp-tree-nodes: term.sftp-tree-nodes;
+                    sftp-follow-cd <=> root.sftp-follow-cd;
+                    connection-state: root.connection-state;
+                    cpu-percent: root.cpu-percent;
+                    mem-detail: root.mem-detail;
+                    net-top-up: root.net-top-up;
+                    net-top-down: root.net-top-down;
+                    disks: root.disks;
                     send-key(key, ctrl, alt, shift) => { root.send-key(term.id, key, ctrl, alt, shift) }
                     terminal-resize(w, h) => { root.terminal-resize(term.id, w, h) }
                     sftp-navigate(path) => { root.sftp-navigate(term.id, path); }
@@ -774,6 +789,7 @@ export component AppWindow inherits Window {
                     select-update(r, c) => { root.term-select-update(term.id, r, c); }
                     select-end() => { root.term-select-end(term.id); }
                     select-autoscroll(dir) => { root.term-select-autoscroll(term.id, dir); }
+                    set-sftp-follow-cd(checked) => { root.set-sftp-follow-cd(checked); }
                 }
             }
         }
@@ -782,6 +798,7 @@ export component AppWindow inherits Window {
     // --- Top-right buttons: [☀/🌙 theme] [↓ download] [⚙ settings] ----------
     // Settings (gear) — far right.
     Rectangle {
+        visible: !root.moba-mode;
         x: root.width - 34px;
         y: root.moba-mode ? 56px : 8px;
         width: 26px;
@@ -806,6 +823,7 @@ export component AppWindow inherits Window {
     }
     // Download manager — left of settings.
     Rectangle {
+        visible: !root.moba-mode;
         x: root.width - 64px;
         y: root.moba-mode ? 56px : 8px;
         width: 26px;
@@ -831,6 +849,7 @@ export component AppWindow inherits Window {
     // Theme toggle (sun = currently dark → click for light;
     //               moon = currently light → click for dark) — left of download.
     Rectangle {
+        visible: !root.moba-mode;
         x: root.width - 94px;
         y: root.moba-mode ? 56px : 8px;
         width: 26px;

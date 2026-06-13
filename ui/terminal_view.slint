@@ -1,5 +1,6 @@
 import { Theme } from "theme.slint";
 import { SftpPanel, SftpEntry, SftpTreeNode } from "sftp_panel.slint";
+import { DiskInfo } from "sidebar.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
 // with the CORRECT font (Cascadia Mono), not a system fallback.  Font imports
@@ -86,10 +87,22 @@ export component TerminalView inherits Rectangle {
     in property <string>  sftp-status: "";
     in property <bool>    sftp-loading: false;
     in property <[SftpTreeNode]> sftp-tree-nodes: [];
+    in property <string> connection-state: @tr("Not connected");
+    in property <float> cpu-percent;
+    in property <string> mem-detail;
+    in property <string> net-top-up;
+    in property <string> net-top-down;
+    in property <[DiskInfo]> disks;
+    in-out property <bool> sftp-follow-cd: true;
 
     in-out property <length> sftp-panel-height: 220px;
     property <length> sftp-saved-height: 220px;   // height to restore on un-collapse
     property <bool>   sftp-collapsed: false;       // SFTP panel minimised (toolbar only)
+    property <length> moba-sftp-width: 280px;
+    property <bool> moba-sftp-dragging: false;
+    property <length> moba-drag-start-mouse-x: 0px;
+    property <string> moba-resource-tip: "";
+    property <length> moba-resource-tip-x: 0px;
 
     callback send-key(string, bool, bool, bool);
     callback terminal-resize(float, float);
@@ -109,6 +122,7 @@ export component TerminalView inherits Rectangle {
     callback sftp-copy-path(string);
     callback sftp-new-folder(string);
     callback sftp-new-file(string);
+    callback set-sftp-follow-cd(bool);
     callback paste-from-clipboard();
     callback copy-terminal-text();
     callback clear-terminal();              // wipe this session's screen buffer
@@ -218,8 +232,9 @@ export component TerminalView inherits Rectangle {
         spacing: 0;
 
         if root.moba-mode : SftpPanel {
-            width: 280px;
+            width: root.moba-sftp-width;
             moba-mode:     true;
+            moba-follow-cd: root.sftp-follow-cd;
             collapsed:     false;
             current-path:  root.sftp-path;
             entries:       root.sftp-entries;
@@ -242,6 +257,37 @@ export component TerminalView inherits Rectangle {
             copy-path(path)     => { root.sftp-copy-path(path); }
             new-folder(dir)     => { root.sftp-new-folder(dir); }
             new-file(dir)       => { root.sftp-new-file(dir); }
+            moba-toggle-follow-cd(checked) => {
+                root.sftp-follow-cd = checked;
+                root.set-sftp-follow-cd(checked);
+            }
+        }
+
+        if root.moba-mode : Rectangle {
+            width: 5px;
+            background: moba-v-divider-ta.has-hover || root.moba-sftp-dragging
+                ? Theme.accent
+                : Theme.border-subtle;
+            moba-v-divider-ta := TouchArea {
+                mouse-cursor: col-resize;
+                pointer-event(ev) => {
+                    if (ev.kind == PointerEventKind.down) {
+                        root.moba-sftp-dragging = true;
+                        root.moba-drag-start-mouse-x = self.mouse-x;
+                    } else if (ev.kind == PointerEventKind.up) {
+                        root.moba-sftp-dragging = false;
+                    }
+                }
+                moved => {
+                    if (root.moba-sftp-dragging) {
+                        root.moba-sftp-width = clamp(
+                            root.moba-sftp-width + self.mouse-x - root.moba-drag-start-mouse-x,
+                            220px,
+                            min(520px, root.width - 360px)
+                        );
+                    }
+                }
+            }
         }
 
     VerticalLayout {
@@ -727,16 +773,101 @@ export component TerminalView inherits Rectangle {
 
         if root.moba-mode : Rectangle {
             height: 28px;
-            background: #eeeeee;
+            background: Theme.bg-panel-alt;
             border-width: 1px;
-            border-color: #cfd8e3;
+            border-color: Theme.border-subtle;
             HorizontalLayout {
-                padding-left: 8px;
-                spacing: 14px;
-                Text { text: root.status-line; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
-                Text { text: "CPU 0%"; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
-                Text { text: "0.00 Mb/s"; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
-                Text { text: root.sftp-path; color: #333333; font-size: Theme.fs-xs; vertical-alignment: center; }
+                spacing: 0;
+                Rectangle {
+                    width: 190px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 6px;
+                        Text { text: "\u{E88A}"; font-family: "Material Icons"; color: Theme.accent; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: root.connection-state; color: Theme.text-primary; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    }
+                }
+                Rectangle {
+                    width: 108px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    HorizontalLayout {
+                        padding-left: 8px; spacing: 6px;
+                        Text { text: "\u{E322}"; font-family: "Material Icons"; color: Theme.success; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: Math.round(root.cpu-percent * 100) + "%"; color: Theme.text-primary; font-size: Theme.fs-xs; vertical-alignment: center; }
+                    }
+                }
+                Rectangle {
+                    width: 190px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    mem-tip-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.moba-resource-tip = "内存占用: " + root.mem-detail;
+                                root.moba-resource-tip-x = 300px;
+                            } else {
+                                root.moba-resource-tip = "";
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 6px;
+                        Text { text: "\u{E1DB}"; font-family: "Material Icons"; color: Theme.success; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: "内存占用 " + root.mem-detail; color: Theme.text-primary; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    }
+                }
+                for d[i] in root.disks : Rectangle {
+                    visible: i < 4;
+                    width: self.visible ? 150px : 0px;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    disk-tip-ta := TouchArea {
+                        changed has-hover => {
+                            if (self.has-hover) {
+                                root.moba-resource-tip = "磁盘占用: " + d.path + " " + Math.round(d.percent * 100) + "% " + d.detail;
+                                root.moba-resource-tip-x = 490px + i * 150px;
+                            } else {
+                                root.moba-resource-tip = "";
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 8px; spacing: 6px;
+                        Text { text: "\u{E1DB}"; font-family: "Material Icons"; color: Theme.text-secondary; font-size: Theme.fs-sm; vertical-alignment: center; }
+                        Text { text: "磁盘占用 " + d.path + ": " + Math.round(d.percent * 100) + "%"; color: Theme.text-primary; font-size: Theme.fs-xs; vertical-alignment: center; horizontal-stretch: 1; overflow: elide; }
+                    }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-width: 1px;
+                    border-color: Theme.border-subtle;
+                    Text { x: 8px; width: parent.width - 16px; text: root.sftp-path; color: Theme.text-primary; font-size: Theme.fs-xs; vertical-alignment: center; overflow: elide; }
+                }
+            }
+            if root.moba-resource-tip != "" : Rectangle {
+                x: clamp(root.moba-resource-tip-x, 4px, parent.width - 560px);
+                y: -31px;
+                width: 560px;
+                height: 26px;
+                z: 50;
+                background: Theme.bg-elevated;
+                border-radius: Theme.radius-sm;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
+                drop-shadow-blur: 8px;
+                drop-shadow-offset-y: 2px;
+                drop-shadow-color: #00000050;
+                Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    text: root.moba-resource-tip;
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
             }
         }
     }

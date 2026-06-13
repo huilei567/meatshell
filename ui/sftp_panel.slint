@@ -58,6 +58,7 @@ export component SftpPanel inherits Rectangle {
     in property <[SftpTreeNode]> tree-nodes: [];
     in property <bool> collapsed: false;   // when true only the toolbar shows
     in property <bool> moba-mode: false;   // compact MobaXterm-style current-directory list
+    in property <bool> moba-follow-cd: true;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     // Panel-level right-click context menu (#84). One menu for the whole list:
     // an empty `menu-target` means the click landed on whitespace, which greys
@@ -88,6 +89,7 @@ export component SftpPanel inherits Rectangle {
     callback copy-path(string);
     callback new-folder(string /* parent dir */);
     callback new-file(string /* parent dir */);
+    callback moba-toggle-follow-cd(bool);
 
     // -----------------------------------------------------------------------
     background: Theme.bg-panel;
@@ -99,9 +101,98 @@ export component SftpPanel inherits Rectangle {
     VerticalLayout {
         spacing: 0;
 
+        if root.moba-mode : VerticalLayout {
+            spacing: 0;
+            Rectangle {
+                height: 28px;
+                background: Theme.bg-panel-alt;
+                HorizontalLayout {
+                    padding-left: 4px;
+                    padding-right: 4px;
+                    spacing: 6px;
+
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 3px;
+                        background: moba-up-ta.has-hover ? Theme.bg-hover : transparent;
+                        moba-up-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.navigate(".."); }
+                        }
+                        Text { text: "\u{E2C6}"; font-family: "Material Icons"; color: #f0b400; font-size: 21px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 3px;
+                        background: moba-upload-ta.has-hover ? Theme.bg-hover : transparent;
+                        moba-upload-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.upload-clicked(root.current-path, false); }
+                        }
+                        Text { text: "\u{E2C3}"; font-family: "Material Icons"; color: #009688; font-size: 21px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 3px;
+                        background: moba-download-ta.has-hover ? Theme.bg-hover : transparent;
+                        moba-download-ta := TouchArea {
+                            mouse-cursor: root.menu-target != "" ? pointer : default;
+                            clicked => { if (root.menu-target != "") { root.download(root.menu-target); } }
+                        }
+                        Text { text: "\u{E2C4}"; font-family: "Material Icons"; color: root.menu-target != "" ? #1976d2 : Theme.text-muted; font-size: 21px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle {
+                        width: 28px;
+                        height: 28px;
+                        border-radius: 14px;
+                        background: moba-refresh-ta.has-hover ? Theme.bg-hover : transparent;
+                        moba-refresh-ta := TouchArea {
+                            mouse-cursor: pointer;
+                            clicked => { root.navigate(root.current-path); }
+                        }
+                        Text { text: "\u{E5D5}"; font-family: "Material Icons"; color: #43a047; font-size: 21px; horizontal-alignment: center; vertical-alignment: center; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+
+            Rectangle {
+                height: 31px;
+                background: Theme.bg-root;
+                border-width: 1px;
+                border-color: Theme.border-subtle;
+                moba-path-input := TextInput {
+                    x: 4px;
+                    y: 0px;
+                    width: parent.width - 38px;
+                    height: parent.height;
+                    text: root.current-path;
+                    color: Theme.text-primary;
+                    font-family: Theme.ui-font-family;
+                    font-size: Theme.fs-sm;
+                    vertical-alignment: center;
+                    single-line: true;
+                    accepted => { root.navigate(self.text); }
+                }
+                Rectangle {
+                    x: parent.width - 30px;
+                    y: 3px;
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 12px;
+                    background: #4caf50;
+                    Text { text: "\u{E5CA}"; font-family: "Material Icons"; color: #ffffff; font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+        }
+
         // --- Toolbar (full width) ------------------------------------------
         Rectangle {
-            height: 30px;
+            visible: !root.moba-mode;
+            height: root.moba-mode ? 0px : 30px;
             background: Theme.bg-panel-alt;
 
             HorizontalLayout {
@@ -325,7 +416,13 @@ export component SftpPanel inherits Rectangle {
 
                             moba-row-ta := TouchArea {
                                 mouse-cursor: pointer;
-                                clicked => { root.selected-row = i; }
+                                clicked => {
+                                    root.selected-row = i;
+                                    root.menu-target = entry.full-path;
+                                    root.menu-target-name = entry.name;
+                                    root.menu-target-is-dir = entry.is-dir;
+                                    root.menu-target-mode = entry.mode;
+                                }
                                 double-clicked => {
                                     if (entry.is-dir) {
                                         root.navigate(entry.full-path);
@@ -354,9 +451,9 @@ export component SftpPanel inherits Rectangle {
                                 spacing: 8px;
                                 Text {
                                     width: 20px;
-                                    text: entry.is-dir ? "\u{E2C7}" : "\u{E24D}";
+                                    text: entry.name == ".." ? "\u{E2C6}" : (entry.is-dir ? "\u{E2C7}" : "\u{E24D}");
                                     font-family: "Material Icons";
-                                    color: entry.is-dir ? #d6a436 : Theme.text-muted;
+                                    color: entry.name == ".." ? #66bb6a : (entry.is-dir ? #d6a436 : Theme.text-muted);
                                     font-size: Theme.fs-md;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -718,7 +815,7 @@ export component SftpPanel inherits Rectangle {
         }
 
         // --- Status bar (full width) --------------------------------------
-        Rectangle {
+        if !root.moba-mode : Rectangle {
             height: 18px;
             background: Theme.bg-panel-alt;
             Text {
@@ -730,6 +827,53 @@ export component SftpPanel inherits Rectangle {
                 height: parent.height;
                 overflow: elide;
                 width: parent.width - 16px;
+            }
+        }
+        if root.moba-mode : Rectangle {
+            height: 28px;
+            background: sftp-tab-ta.has-hover ? Theme.bg-hover : Theme.bg-panel-alt;
+            border-width: 1px;
+            border-color: Theme.border-subtle;
+            sftp-tab-ta := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { root.moba-toggle-follow-cd(!root.moba-follow-cd); }
+            }
+            HorizontalLayout {
+                padding-left: 8px;
+                padding-right: 8px;
+                spacing: 7px;
+                Rectangle {
+                    width: 18px;
+                    height: 18px;
+                    border-radius: 3px;
+                    border-width: 1px;
+                    border-color: root.moba-follow-cd ? Theme.accent : Theme.border-strong;
+                    background: root.moba-follow-cd ? Theme.accent : transparent;
+                    Text {
+                        text: root.moba-follow-cd ? "\u{E5CA}" : "";
+                        font-family: "Material Icons";
+                        color: #ffffff;
+                        font-size: Theme.fs-sm;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: "SFTP";
+                    color: Theme.text-primary;
+                    font-size: Theme.fs-xs;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Text {
+                    text: root.current-path;
+                    color: Theme.text-muted;
+                    font-size: Theme.fs-xs;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    max-width: 150px;
+                }
             }
         }
     }
