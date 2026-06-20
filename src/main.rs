@@ -5,7 +5,10 @@
 
 mod app;
 mod config;
+mod errlog;
+mod forward;
 mod i18n;
+mod known_hosts;
 mod proxy;
 mod serial;
 mod sftp;
@@ -16,10 +19,23 @@ mod telnet;
 mod zmodem;
 
 fn main() -> anyhow::Result<()> {
-    // Initialise tracing — honour RUST_LOG but default to info.
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // macOS renderer is left at Slint's default (femtovg) and is NOT forced.
+    //
+    // History: 0.4.10 force-set SLINT_BACKEND=winit-skia to work around femtovg's
+    // CoreText font lookup failing on macOS 26 / Tahoe (all text vanished, #108).
+    // That fix shipped without on-device verification and turned out to *break* a
+    // different set of Macs (Apple Silicon M5 / 26.5): Skia couldn't resolve the
+    // "PingFang SC" UI font and all text vanished there instead (#129). Icons
+    // survived in both cases because Material Icons is an embedded font.
+    //
+    // Neither renderer works for every macOS machine, so we no longer pick for the
+    // user: femtovg is the known-good default for the majority. Users for whom
+    // femtovg fails to render text (e.g. #108) can opt into Skia at launch with
+    //     SLINT_BACKEND=winit-skia
+    // The renderer-skia feature is still compiled in on macOS (see Cargo.toml) so
+    // that override is available without a rebuild.
+
+    init_tracing();
 
     // ── IME policy ───────────────────────────────────────────────────────────
     // NOTE: We deliberately DO **NOT** call `ImmDisableIME` here.
@@ -37,4 +53,45 @@ fn main() -> anyhow::Result<()> {
     // `app::on_send_key`, so we no longer need (and must not use) ImmDisableIME.
 
     app::run()
+}
+
+/// Set up tracing: stderr (honours RUST_LOG, default info) **plus** a capped
+/// `error.log` file at WARN and above so users can send diagnostics — e.g. a
+/// bastion disconnect reason — without setting RUST_LOG (#86).
+fn init_tracing() {
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    // ICU4X's data-error warnings (now routed through `log` → tracing, see the
+    // icu_provider dependency) are pure noise — silence them on every layer.
+    fn silence_icu(mut f: EnvFilter) -> EnvFilter {
+        for d in ["icu_provider=off", "icu_segmenter=off", "icu_normalizer=off"] {
+            if let Ok(dir) = d.parse() {
+                f = f.add_directive(dir);
+            }
+        }
+        f
+    }
+
+    let env_filter = silence_icu(
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+    );
+    let stderr_layer = fmt::layer()
+        .with_writer(std::io::stderr)
+        .with_filter(env_filter);
+
+    // One file, capped at 5 MiB, auto-overwriting when full.
+    let file_layer = errlog::path()
+        .and_then(|p| errlog::CappedFile::open(p, 5 * 1024 * 1024).ok())
+        .map(|cf| {
+            fmt::layer()
+                .with_ansi(false)
+                .with_writer(errlog::CappedWriter::new(cf))
+                .with_filter(silence_icu(EnvFilter::new("warn")))
+        });
+
+    tracing_subscriber::registry()
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
 }

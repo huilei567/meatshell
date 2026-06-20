@@ -1,6 +1,14 @@
 import { Theme } from "theme.slint";
 import { LabeledInput, PrimaryButton, GhostButton } from "widgets.slint";
 
+// One SSH port-forward row shown in the session dialog (#56). `summary` is a
+// ready-to-display line like "-L 127.0.0.1:8080 → host:80".
+export struct PortFwd {
+    kind: string,
+    name: string,
+    summary: string,
+}
+
 export struct SessionDraft {
     id: string,
     name: string,
@@ -46,6 +54,37 @@ component SegOption inherits Rectangle {
     }
 }
 
+// Compact single-line input (no label) used in the port-forward add form (#56).
+component MiniInput inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> value;
+    height: 30px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius-sm;
+    border-width: 1px;
+    border-color: mi.has-focus ? Theme.accent : Theme.border-subtle;
+    background: Theme.bg-root;
+    mi := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        height: parent.height;
+        color: Theme.text-primary;
+        font-family: Theme.ui-font-family;
+        font-size: Theme.fs-md;
+        vertical-alignment: center;
+        single-line: true;
+        text <=> root.value;
+    }
+    if root.value == "" : Text {
+        x: 8px;
+        height: parent.height;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-size: Theme.fs-md;
+        vertical-alignment: center;
+    }
+}
+
 // Modal dialog for creating / editing a session (SSH / Serial / Telnet).
 // The dialog is purely presentational — it stores values in mutable
 // properties and emits `submit` / `cancel` callbacks up to the main window.
@@ -57,7 +96,9 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-kind: "ssh";
     in-out property <string> draft-host;
     in-out property <string> draft-port: "22";
-    in-out property <string> draft-user: "root";
+    in-out property <string> draft-user;
+    // Set when Create/Save is pressed with an empty host (SSH/Telnet) (#110).
+    in-out property <bool> host-missing: false;
     in-out property <string> draft-auth: "password";
     in-out property <string> draft-password;
     in-out property <string> draft-key-path;
@@ -71,12 +112,29 @@ export component SessionDialog inherits Rectangle {
     in-out property <string> draft-parity: "none";
     in-out property <string> draft-flow: "none";
 
+    // Port forwards / tunnels (#56). `forwards` is the current list (fed from
+    // Rust); the nf-* properties hold the add-form fields.
+    in property <[PortFwd]> forwards;
+    property <string> nf-kind: "local";   // "local" | "remote" | "dynamic"
+    property <string> nf-name;            // optional rule label (#100)
+    property <string> nf-bind: "127.0.0.1";
+    property <string> nf-port;
+    property <string> nf-host;
+    property <string> nf-host-port;
+    property <bool> show-advanced: false;   // collapse proxy + forwarding (#56)
+
     callback submit(SessionDraft);
     callback cancel();
+    callback add-forward(string /* name */, string /* kind */, string /* bind */, int /* port */,
+                         string /* host */, int /* host-port */);
+    callback delete-forward(int /* index */);
     callback pick-key-file();   // open a native file picker for the private key
 
     visible: is-open;
     background: #000000aa;
+
+    // Clear the host-required flag each time the dialog opens (#110).
+    changed is-open => { if (self.is-open) { self.host-missing = false; } }
 
     // Swallow clicks on the backdrop
     TouchArea {
@@ -86,10 +144,10 @@ export component SessionDialog inherits Rectangle {
 
     Rectangle {
         width: 440px;
-        // Height follows the content so switching connection type (which shows
-        // or hides fields) never leaves slack space that the layout would
-        // otherwise distribute by stretching inputs apart.
-        height: body.preferred-height;
+        // Height follows the content, but never exceeds the window — past that
+        // the body scrolls (the dialog grows with the advanced section / many
+        // port forwards) (#56).
+        height: min(body.preferred-height, parent.height - 40px);
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
         background: Theme.bg-panel;
@@ -104,9 +162,14 @@ export component SessionDialog inherits Rectangle {
             width: 100%; height: 100%;
         }
 
-        body := VerticalLayout {
-            padding: 20px;
-            spacing: 12px;
+        Flickable {
+            width: 100%;
+            height: 100%;
+            viewport-width: self.width;
+            viewport-height: body.preferred-height;
+            body := VerticalLayout {
+                padding: 20px;
+                spacing: 12px;
 
             Text {
                 text: is-editing ? @tr("Edit session") : @tr("New session");
@@ -173,10 +236,17 @@ export component SessionDialog inherits Rectangle {
                 }
             }
 
+            // Inline error when a host-less SSH/Telnet session is submitted (#110).
+            if root.host-missing && root.draft-host == "" && root.draft-kind != "serial" : Text {
+                text: @tr("Please enter a host / IP address.");
+                color: Theme.danger;
+                font-size: Theme.fs-sm;
+            }
+
             // ── SSH-only: user + auth ───────────────────────────────────────
             if root.draft-kind == "ssh" : LabeledInput {
                 label: @tr("Username");
-                placeholder: "root";
+                placeholder: @tr("Prompted on connect if blank");
                 value <=> root.draft-user;
             }
 
@@ -231,6 +301,7 @@ export component SessionDialog inherits Rectangle {
                             height: parent.height;
                             text <=> root.draft-key-path;
                             color: Theme.text-primary;
+                            font-family: Theme.ui-font-family; // CJK-capable (#54)
                             font-size: Theme.fs-md;
                             vertical-alignment: center;
                             single-line: true;
@@ -268,6 +339,18 @@ export component SessionDialog inherits Rectangle {
                     color: Theme.text-muted;
                     font-size: Theme.fs-xs;
                 }
+            }
+
+            // Passphrase for an *encrypted* private key (#90). Reuses the
+            // password field; blank means the key isn't encrypted (or, when
+            // editing, keep the saved passphrase).
+            if root.draft-kind == "ssh" && root.draft-auth == "key" : LabeledInput {
+                label: @tr("Key passphrase");
+                placeholder: root.is-editing
+                    ? @tr("Leave blank to keep the current passphrase")
+                    : @tr("Leave blank if the key isn't encrypted");
+                password: true;
+                value <=> root.draft-password;
             }
 
             // ── Serial-only fields ──────────────────────────────────────────
@@ -319,8 +402,34 @@ export component SessionDialog inherits Rectangle {
                 }
             }
 
+            // ── Advanced (collapsed by default): proxy + port forwarding ────
+            if root.draft-kind != "serial" : Rectangle {
+                height: 26px;
+                adv-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.show-advanced = !root.show-advanced; }
+                }
+                HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: @tr("Advanced (proxy, tunnels)");
+                        color: adv-ta.has-hover ? Theme.text-primary : Theme.text-secondary;
+                        font-size: Theme.fs-sm;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: root.show-advanced ? "\u{E5CE}" : "\u{E5CF}";
+                        font-family: "Material Icons";
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-md;
+                        vertical-alignment: center;
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+            }
+
             // ── Optional outbound proxy (SSH / Telnet only) ─────────────────
-            if root.draft-kind != "serial" : VerticalLayout {
+            if root.show-advanced && root.draft-kind != "serial" : VerticalLayout {
                 spacing: 4px;
                 Text {
                     text: @tr("Proxy (optional)");
@@ -347,7 +456,99 @@ export component SessionDialog inherits Rectangle {
                 }
             }
 
-            Rectangle { vertical-stretch: 1; }
+            // ── Port forwarding / tunnels (SSH only) (#56) ──────────────────
+            if root.show-advanced && root.draft-kind == "ssh" : VerticalLayout {
+                spacing: 6px;
+                Text {
+                    text: @tr("Port forwarding");
+                    color: Theme.text-secondary;
+                    font-size: Theme.fs-sm;
+                }
+
+                // Existing forwards, each with a delete button.
+                for f[i] in root.forwards : Rectangle {
+                    height: 30px;
+                    border-radius: Theme.radius-sm;
+                    background: Theme.bg-root;
+                    HorizontalLayout {
+                        padding-left: 8px; padding-right: 4px; spacing: 6px;
+                        if f.name != "" : Text {
+                            text: f.name;
+                            color: Theme.accent;
+                            font-size: Theme.fs-sm;
+                            font-weight: 600;
+                            font-family: Theme.ui-font-family;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: f.summary;
+                            color: Theme.text-primary;
+                            font-size: Theme.fs-sm;
+                            font-family: Theme.ui-font-family;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        Rectangle {
+                            width: 24px;
+                            y: (parent.height - self.height) / 2;
+                            height: 24px;
+                            border-radius: Theme.radius-sm;
+                            background: fdel.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                            fdel := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.delete-forward(i); }
+                            }
+                            Text { text: "\u{E5CD}"; font-family: "Material Icons";
+                                   color: Theme.danger; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+
+                // Add form: kind selector, then bind/port (+ target for L/R).
+                HorizontalLayout {
+                    spacing: 6px;
+                    SegOption { label: @tr("Local (-L)"); active: root.nf-kind == "local"; clicked => { root.nf-kind = "local"; } }
+                    SegOption { label: @tr("Remote (-R)"); active: root.nf-kind == "remote"; clicked => { root.nf-kind = "remote"; } }
+                    SegOption { label: @tr("Dynamic (-D)"); active: root.nf-kind == "dynamic"; clicked => { root.nf-kind = "dynamic"; } }
+                }
+                MiniInput { placeholder: @tr("Name (optional)"); value <=> root.nf-name; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    MiniInput { placeholder: "127.0.0.1"; value <=> root.nf-bind; }
+                    MiniInput { placeholder: @tr("Listen port"); value <=> root.nf-port; }
+                }
+                if root.nf-kind != "dynamic" : HorizontalLayout {
+                    spacing: 6px;
+                    MiniInput { placeholder: @tr("Target host"); value <=> root.nf-host; }
+                    MiniInput { placeholder: @tr("Target port"); value <=> root.nf-host-port; }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    PrimaryButton {
+                        text: @tr("Add");
+                        clicked => {
+                            root.add-forward(root.nf-name, root.nf-kind, root.nf-bind, root.nf-port.to-float(),
+                                             root.nf-host, root.nf-host-port.to-float());
+                            root.nf-name = "";
+                            root.nf-port = "";
+                            root.nf-host = "";
+                            root.nf-host-port = "";
+                        }
+                    }
+                }
+                Text {
+                    text: root.nf-kind == "local"
+                        ? @tr("-L: local port → target reached from the server")
+                        : (root.nf-kind == "remote"
+                            ? @tr("-R: server port → target reached from here")
+                            : @tr("-D: local SOCKS5 proxy"));
+                    color: Theme.text-muted;
+                    font-size: Theme.fs-xs;
+                }
+            }
 
             HorizontalLayout {
                 alignment: end;
@@ -359,6 +560,12 @@ export component SessionDialog inherits Rectangle {
                 PrimaryButton {
                     text: is-editing ? @tr("Save") : @tr("Create");
                     clicked => {
+                        // SSH/Telnet need a host; block submit and flag it (#110).
+                        if (root.draft-kind != "serial" && root.draft-host == "") {
+                            root.host-missing = true;
+                            return;
+                        }
+                        root.host-missing = false;
                         root.submit({
                             id: root.draft-id,
                             name: root.draft-name,
@@ -383,6 +590,7 @@ export component SessionDialog inherits Rectangle {
                     }
                 }
             }
+        }
         }
     }
 }

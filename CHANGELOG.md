@@ -5,6 +5,435 @@ All notable changes are documented here. 本文件记录所有重要变更。
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-06-20
+
+### Fixed / 修复
+
+- **macOS 26 blank text — switch the default CJK UI font to one femtovg can render
+  (#129, #108).** Root cause finally pinned: on some macOS 26 machines femtovg
+  cannot rasterize the *modern* system CJK fonts (PingFang SC, Hiragino) — fontdb
+  finds them but every glyph comes out blank — while the older Heiti/STHeiti/Songti
+  faces render perfectly (verified per-font on an M2 / macOS 26). It was never the
+  renderer (0.4.11's femtovg revert alone didn't help) nor font *loading* (fontdb
+  loaded 900+ faces). The UI now prefers the reliably-rendering "Heiti SC" (a clean
+  sans-serif that ships on every macOS), with STHeiti/Songti as further fallbacks
+  and the embedded "Meatshell Mono" as a last resort so the window is never blank.
+  A `MEATSHELL_UI_FONT="<family>"` env var can force any family without a rebuild.
+  **修复 macOS 26 文字全白——默认中文界面字体改用 femtovg 能渲染的字体 (#129, #108)。**
+  根因最终定位:部分 macOS 26 机器上 femtovg 无法栅格化*新版*系统中文字体(PingFang
+  SC、Hiragino)——fontdb 能找到它们,但每个字形都画成空白;而老字体
+  Heiti/STHeiti/Songti 渲染完全正常(已在 M2 / macOS 26 上逐字体实测)。既不是渲染器
+  (0.4.11 单独退回 femtovg 没用),也不是字体*加载*(fontdb 加载了 900+ 个 face)。
+  界面现在优先用稳定渲染的「Heiti SC」(所有 macOS 自带的干净黑体),STHeiti/Songti
+  作为后备,内置「Meatshell Mono」兜底,确保窗口永不全白。可用环境变量
+  `MEATSHELL_UI_FONT="<字体名>"` 免重编强制指定任意字体。
+
+## [0.4.11] - 2026-06-20
+
+### Fixed / 修复
+
+- **macOS text-invisible regression — renderer no longer force-switched (#129, #108).**
+  0.4.10 force-set the Skia renderer on macOS to work around femtovg failing to
+  render text on macOS 26 (#108). That shipped unverified and broke a *different*
+  set of Macs (Apple Silicon, macOS 26.5): Skia could not resolve the "PingFang SC"
+  UI font, so all text vanished there instead (icons survived because they use an
+  embedded font). The default now stays femtovg (known-good for the majority);
+  Skia is still compiled in on macOS and can be opted into at launch with
+  `SLINT_BACKEND=winit-skia` for machines where femtovg fails.
+  **修复 macOS 文本全部消失的回退问题——不再强制切换渲染器 (#129, #108)。** 0.4.10 为
+  绕过 macOS 26 上 femtovg 取字失败(#108),在 macOS 强制改用 Skia 渲染器;该改动
+  未经真机验证就发布,反而弄坏了另一批 Mac(Apple Silicon / macOS 26.5):Skia 无法
+  解析「PingFang SC」界面字体,导致这些机器上文字全部消失(图标因使用内嵌字体而正常)。
+  现默认改回 femtovg(对绝大多数机器正常);macOS 仍编译 Skia,femtovg 失效的机器可在
+  启动时用 `SLINT_BACKEND=winit-skia` 手动启用。
+
+### Added / 新增
+
+- **Cancel an in-progress upload, with remote cleanup (#100).** Uploads can now be
+  cancelled like downloads; cancelling removes the half-written file on the remote
+  so no partial junk is left behind.
+  **上传也支持取消并清理远端半成品 (#100)。** 上传可像下载一样取消;取消会删除远端已
+  写入的半成品文件,服务端不留垃圾。
+
+- **Sponsor / donation link in the README.** Added a WeChat sponsor QR for anyone
+  who'd like to support development.
+  **README 增加赞助/捐赠入口。** 加入微信赞助二维码,欢迎支持项目开发。
+
+### Changed / 优化
+
+- **Silenced ICU4X segmentation-data log noise.** Suppressed the spurious ICU4X
+  data-error warnings so they no longer clutter the log / error.log.
+  **屏蔽 ICU4X 段落数据噪音日志。** 抑制无意义的 ICU4X data-error 警告,不再污染日志
+  与 error.log。
+
+## [0.4.10] - 2026-06-19
+
+### Added / 新增
+
+- **SFTP multi-select with one-archive download (#100).** Check multiple files in
+  the SFTP panel and download them together: the selection is packed into a single
+  `tar` on the remote (named after the first item, e.g. `11等文件.tar`), pulled in
+  one transfer, then the temp is removed. Any download action (right-click, row,
+  toolbar) packs the whole checked set when 2+ are checked; a single selection
+  downloads as a plain file. Batch delete is also supported, and an empty folder
+  is reported instead of creating an empty local directory.
+  **SFTP 文件多选 + 打包下载 (#100)。** 在 SFTP 面板勾选多个文件即可一起下载:选中
+  项在远端打包成单个 `tar`(以第一个文件命名,如 `11等文件.tar`),一次性下载后删除
+  临时包。勾选 ≥2 项时,任意下载动作(右键/行内/工具栏)都打包整组;单选则按普通
+  文件下载。同时支持批量删除;下载空文件夹会给出提示而非创建空目录。
+
+- **Cancel an in-progress transfer (#100).** Each transfer row shows a cancel
+  button while active or preparing; cancelling removes the partial local file and,
+  for archive downloads, the remote temp archive — no junk left on either side.
+  **可取消进行中的传输 (#100)。** 传输记录每行在下载中/准备中时显示取消按钮;取消会
+  删除本地半成品文件,打包下载还会删除远端临时包,本地与服务端都不留垃圾。
+
+- **Name port-forward rules (#100).** Port-forward rules can be given an optional
+  name so they're easy to tell apart in the list.
+  **端口转发规则可命名 (#100)。** 转发规则可设置可选名称,便于在列表中区分。
+
+- **Global UI scale setting (#100 #117 #118).** A scale control in Interface
+  settings zooms the whole UI (fonts, spacing, radii) from 80% to 200%.
+  **界面整体缩放设置 (#100 #117 #118)。** 界面设置新增缩放控件,可将整个界面(字体、
+  间距、圆角)从 80% 到 200% 缩放。
+
+### Changed / 优化
+
+- **Much faster downloads (#100).** Downloads now use a dedicated, pipelined SFTP
+  channel that keeps many READ requests in flight at once (like uploads already
+  did), hiding round-trip latency — large files and archive bundles download
+  noticeably faster.
+  **下载大幅提速 (#100)。** 下载改用专用、流水线化的 SFTP 通道,多个读请求并发在途
+  (与上传一致),掩盖往返延迟 —— 大文件和打包包下载明显更快。
+
+- **Switch directories during transfers.** SFTP transfers run on their own task,
+  so listing and changing directories stays responsive while files move.
+  **传输时仍可切换目录。** SFTP 传输在独立任务上运行,文件传输期间列目录、切换目录
+  依然流畅。
+
+### Fixed / 修复
+
+- **macOS 26 (Tahoe): all UI text invisible (#108).** The default femtovg renderer
+  failed CoreText font lookup on macOS 26, blanking every glyph including the
+  embedded mono font. macOS now uses the Skia renderer (Windows/Linux unchanged).
+  **macOS 26 (Tahoe) 界面文本全部消失 (#108)。** 默认 femtovg 渲染器在 macOS 26 上
+  取字失败,所有文字(含内嵌等宽字体)消失。macOS 现改用 Skia 渲染器(Windows/Linux
+  不变)。
+
+- **Welcome session list now scrolls (#116).** When there are more sessions than
+  fit, the welcome screen's session list scrolls instead of clipping.
+  **欢迎页会话列表可滚动 (#116)。** 会话过多时,欢迎页的会话列表可滚动,不再被裁切。
+
+## [0.4.9] - 2026-06-19
+
+### Added / 新增
+
+- **Searchable command-history dropdown (#101).** The command-history list is now
+  filterable — type in the search box to narrow entries instantly, then click or
+  press Enter to run the match.
+  **命令历史下拉支持搜索 (#101)。** 历史列表新增搜索框,输入关键字即可实时过滤,
+  点击或回车直接执行匹配项。
+
+- **Readline keys in the command box + shortcuts reference (#103).** The command
+  box now honours common readline bindings (Ctrl+A/E/K/U/W, Alt+B/F/D/Backspace,
+  etc.) for fast inline editing; a keyboard-shortcuts reference panel is also
+  added so users can discover available bindings at a glance.
+  **命令输入框支持 Readline 快捷键 + 快捷键参考 (#103)。** 命令框现在支持常见
+  readline 绑定(Ctrl+A/E/K/U/W、Alt+B/F/D/Backspace 等)进行快速行内编辑;
+  另加快捷键参考面板,方便用户一览可用组合键。
+
+- **Scroll arrows when tabs overflow (#122).** When open tabs exceed the tab bar
+  width, left/right arrow buttons appear so users can scroll through the hidden
+  tabs instead of losing access to them.
+  **标签溢出时显示滚动箭头 (#122)。** 当打开的标签超出标签栏宽度时,左右箭头
+  按钮出现,可滚动查看被遮挡的标签。
+
+- **Slim scrollbar for the terminal output area (#103).** The terminal's vertical
+  scrollbar is now a thin, auto-hiding overlay that doesn't eat into the column
+  count, giving more screen real estate to the actual output.
+  **终端输出区窄滚动条 (#103)。** 终端纵向滚动条改为细窄的自动隐藏覆盖层,
+  不再占用列数,把更多屏幕空间留给实际输出。
+
+### Fixed / 修复
+
+- **Preserve the MOTD/banner when hiding the injected setup line (#98).** The
+  previous approach stripped too aggressively and could swallow the server's
+  MOTD/banner that arrives before the shell prompt; the matcher now only discards
+  the single injected line, leaving the banner intact.
+  **隐藏注入设置行时保留 MOTD/横幅 (#98)。** 之前的做法剥离过度,会把 shell 提示符
+  之前到达的服务器 MOTD/横幅一并吞掉;现在匹配器仅丢弃注入的那一行,横幅原样保留。
+
+- **Reserve space for toolbar icons + scroll overflowing tabs (#122).** The tab
+  bar now leaves a right margin so the last tab's close button isn't hidden
+  behind the toolbar icons; tabs that still overflow are scrollable.
+  **为工具栏图标预留空间 + 溢出标签可滚动 (#122)。** 标签栏右侧留出余量,
+  最后一个标签的关闭按钮不再被工具栏图标遮挡;仍然溢出的标签可滚动查看。
+
+## [0.4.8] - 2026-06-18
+
+### Added / 新增
+
+- **Immersive frameless title bar.** On Windows/Linux the app draws its own
+  themed title bar (app icon + name, minimize/maximize/close, draggable to move,
+  double-click to maximize, edge/corner resize) instead of the OS chrome — so the
+  top follows the light/dark theme instead of staying a mismatched native bar.
+  macOS keeps its native decorations. (#119)
+  **沉浸式无边框标题栏。** Windows/Linux 下自绘主题色标题栏(应用图标+名称、
+  最小化/最大化/关闭、拖动移动、双击最大化、边角缩放),不再使用系统标题栏,顶部
+  跟随明暗主题;macOS 保留原生标题栏。
+
+### Fixed / 修复
+
+- **htop/btop box-drawing and braille no longer render as tofu** on machines
+  without Cascadia Mono installed (e.g. Win11 Home). The embedded font is now a
+  uniquely-named family ("Meatshell Mono") so the OS can't substitute a
+  glyph-poor fallback for it. (#114)
+  **htop/btop 的线框和盲文字符不再显示为方块**(在未安装 Cascadia Mono 的机器上,
+  如 Win11 家庭版)。内嵌字体改用独一无二的族名「Meatshell Mono」,系统无法再用
+  缺字形的字体顶替它。
+- **The injected setup line no longer leaks to the terminal on connect**, even
+  when it wraps across the terminal width. Output is buffered until the hook's
+  OSC sequence arrives, then everything up to it is discarded. (#98)
+  **连接后不再出现注入的设置命令**,即使它按终端宽度换行也能正确隐藏。
+- **Smooth scrollback across the live/scrolled boundary.** After shrinking then
+  restoring the terminal (e.g. dragging the SFTP panel over it and back),
+  scrolling back through history no longer jumps near the bottom. (#119)
+  **回滚历史在实时/滚动边界处平滑。** 把 SFTP 面板拉上来盖住终端再放下后,往回翻
+  历史时接近底部不再跳。
+- **Fast drag-selection in the terminal works again.** A quick drag is no longer
+  stolen by the Flickable, so selecting text by dragging fast still selects. (#119)
+  **终端里快速拖动选择恢复正常。** 快速拖动不再被滚动容器抢走,快速拖选也能选中。
+- **The Interface dialog's close button can't be dragged off-screen.** Its drag
+  is clamped inside the window, so the modal dialog can no longer become
+  unclosable. (#119)
+  **「界面」设置对话框的关闭按钮不会被拖出屏幕。** 拖动被限制在窗口内,模态对话框
+  不会再变得无法关闭。
+
+## [0.4.7] - 2026-06-16
+
+### Added / 新增
+
+- **Host-key verification with a first-connect confirmation dialog.** On first
+  contact a dialog shows the host, key type and SHA256 fingerprint; the key is
+  remembered (a known_hosts file beside sessions.json) only after you trust it.
+  A later key that differs is flagged as a possible MITM and needs re-confirming.
+  Replaces the previous "accept any key" behaviour. (#109)
+  **主机密钥校验 + 首次连接确认弹窗。** 首次连接会弹窗显示主机、密钥类型和 SHA256
+  指纹,确认信任后才记住(known_hosts 文件,与 sessions.json 同目录);之后密钥若
+  变化会作为疑似中间人攻击提示并要求重新确认。取代了原先「接受任意密钥」的行为。
+- **Quick-connect login, Xshell-style.** New SSH/Telnet sessions now require a
+  host. The username no longer defaults to `root`; if a session is missing its
+  username and/or (password-auth) password, you're prompted for them on connect,
+  with an optional "remember". Auto-naming uses `user@host`, or just the host
+  when no username is given. (#110)
+  **类 Xshell 的快速连接登录。** 新建 SSH/Telnet 会话需填主机;用户名不再默认
+  `root`;会话缺用户名 和/或(密码认证)密码时,连接时弹窗补充,可勾选「记住」。
+  自动命名用 `user@host`,无用户名时仅用主机名。
+- **Commands typed in the terminal now join the command history.** Captured via
+  the shell integration hook (bash/zsh), so the command box and ↑/↓ recall
+  include what you ran in the terminal — passwords typed at prompts are never
+  captured. (#113)
+  **终端里直接敲的命令现在也进命令历史。** 通过 shell 集成钩子(bash/zsh)捕获,
+  命令栏和 ↑/↓ 回溯都会包含;在提示符处输入的密码不会被捕获。
+
+### Changed / 变更
+
+- **Command history is de-duplicated, most-recent last.** Re-running a command
+  moves it to the end instead of leaving duplicates; existing history is cleaned
+  up on load. (#113)
+  **命令历史全局去重,最近使用排在最后。** 重复执行只会把命令移到末尾而不再留重复
+  项;已有历史在加载时清理一次。
+
+### Fixed / 修复
+
+- **The injected prompt-setup line no longer leaks to the terminal on connect.**
+  When the echoed setup line was split across packets the matcher missed it,
+  showing `test -z "$FISH_VERSION" && eval '…'`; output is now buffered until the
+  line is complete so it's reliably stripped however it's chunked. (#98)
+  **连接后不再出现注入的设置命令。** 该回显行被分包拆开时旧逻辑匹配不到,会显示
+  `test -z "$FISH_VERSION" && eval '…'`;现在缓冲到该行完整再剥离,无论如何分块都能隐藏。
+- **ZMODEM `sz a b c` now receives every file**, not just the first — ZEOF ends a
+  file, not the session. (#109)
+  **ZMODEM `sz a b c` 现在会接收每个文件**,而不只是第一个(ZEOF 表示单个文件结束,
+  而非整个会话结束)。
+- **A denied directory listing is handled gracefully.** Instead of spinning
+  forever on a permission error, the panel stops loading and shows a clear
+  "permission denied" message while keeping the current view. (#112)
+  **目录无权限时优雅处理。** 不再卡在加载转圈,面板会停止加载并明确提示「权限不足」,
+  同时保留当前视图。
+- **IPv6 bind addresses are bracketed** for `-L`/`-D` port forwards
+  (`[::1]:8080`). (#109/#105)
+  **端口转发的 IPv6 绑定地址加方括号**(`[::1]:8080`),`-L`/`-D` 现在可用。
+
+## [0.4.6] - 2026-06-14
+
+### Fixed / 修复
+
+- **Session-sync upload now works for drag-and-drop too.** Dropping a file onto
+  the SFTP panel used a separate code path that skipped the session-sync mirror;
+  now both the upload button and drag-and-drop mirror the file to every other
+  online session, each into its own current SFTP directory. (Removed the
+  temporary upload diagnostics added in 0.4.5.)
+  **会话同步上传现在对「拖拽」也生效。** 拖文件到 SFTP 面板走的是另一条代码路径,
+  之前漏掉了会话同步;现在上传按钮和拖拽都会把文件同步到其他在线会话(各进各自
+  当前目录)。(移除了 0.4.5 加的临时上传诊断日志。)
+
+## [0.4.5] - 2026-06-14
+
+### Fixed / 修复
+
+- **Session-sync upload now targets each session's own current directory.**
+  Uploading from one session no longer reuses that session's path for the others
+  (which failed when paths differed, e.g. /home/jeff vs /home/root); each session
+  receives the file in its own current SFTP directory. (Includes temporary
+  diagnostics to nail down a remaining report.)
+  **会话同步上传改为各会话用自己的当前目录。** 从某会话上传不再把它的路径套用到
+  其他会话(路径不同就会失败,如 /home/jeff 与 /home/root);每个会话都收到文件到
+  它自己当前的 SFTP 目录。(含临时诊断日志以定位残留问题。)
+
+## [0.4.4] - 2026-06-14
+
+### Added / 新增
+
+- **Session sync / broadcast input.** A new ⟳ toggle in the top-right bar
+  mirrors keystrokes typed in any terminal to every online session
+  (Xshell-style). Off by default, runtime-only. Settings → Session sync also
+  adds "Sync file uploads during session sync": an upload is mirrored to the
+  same path on each session (or that session's current SFTP dir if the path
+  doesn't exist there).
+  **会话同步 / 广播输入。** 右上角新增 ⟳ 开关,把任意终端里敲的键同步到所有在线
+  会话(Xshell 风格);默认关闭、仅本次运行有效。设置 → 会话同步 还有「会话同步时
+  文件上传同步」:上传会同步到各会话的相同路径(该路径不存在则用该会话当前 SFTP
+  目录)。
+
+- **Tooltips on the top-bar icons** (theme / download / settings / session sync).
+  **右上角图标悬停提示**(切换主题 / 下载 / 设置 / 会话同步)。
+
+### Fixed / 修复
+
+- **Light-mode dialogs.** Inputs and buttons in the group / rename / quick-command
+  dialogs no longer blend into the background under the light theme — Slint's
+  std-widget palette now follows the app theme.
+  **浅色模式对话框。** 分组 / 重命名 / 快捷命令等对话框里的输入框和按钮在浅色主题
+  下不再与背景融为一体——std-widget 调色板现在跟随应用主题。
+
+- **Empty session groups** now show a collapse chevron and can be expanded /
+  collapsed, lining up with non-empty groups.
+  **空会话分组** 现在也显示折叠箭头、可展开 / 收起,与非空分组对齐。
+
+## [0.4.3] - 2026-06-14
+
+### Fixed / 修复
+
+- **Wide CJK glyphs are grid-aligned in the terminal.** With a Chinese path, the
+  trailing `/` after `ll`, the cursor after `cd`, and the prompt `$` no longer
+  overlap or drift away from the last CJK character — each wide character now
+  occupies exactly its two terminal cells.
+  **终端里的中文(宽字符)对齐到网格。** 中文路径下,`ll` 后目录名的 `/`、`cd`
+  之后的光标、提示符 `$` 不再与中文末字重叠或拉开很远——每个宽字符现在正好
+  占它的两个终端格。
+
+## [0.4.1] - 2026-06-14
+
+### Added / 新增
+
+- **Run / copy / delete actions on command history (#96).** Each entry in the
+  command-history dropdown now has run (▶), copy (⧉) and delete (🗑) buttons —
+  run executes it immediately, copy puts it on the clipboard, delete removes it.
+  **命令历史的运行 / 复制 / 删除 (#96)。** 历史下拉里每条记录新增 ▶ 运行、
+  ⧉ 复制、🗑 删除按钮——运行即时执行,复制到剪贴板,删除移除该条。
+
+- **Default-collapse settings for the sidebars (#78).** Settings → Interface →
+  Sidebars adds two checkboxes to collapse the left resource panel and the bottom
+  SFTP panel on startup — handy on low-spec jump hosts.
+  **侧栏默认收起设置 (#78)。** 设置 → 界面 → 侧栏 新增两个复选框,可在启动时
+  收起左侧资源面板和底部 SFTP 面板——适合低配跳板机。
+
+## [0.4.0] - 2026-06-14
+
+### Added / 新增
+
+- **SSH port forwarding / tunnels (#56).** Per-session tunnels configured in the
+  session dialog's Advanced section: local (-L), remote (-R) and dynamic
+  (-D / SOCKS5). They auto-establish on connect and tear down on disconnect.
+  **SSH 端口转发 / 隧道 (#56)。** 在会话对话框「高级」里按会话配置:本地 -L、
+  远程 -R、动态 -D（SOCKS5）。连接时自动建立,断开时拆除。
+
+- **Quick commands, command box & history (#55).** A command bar below the
+  terminal: save named commands and click to run them, type into a command box
+  (with an "all sessions" broadcast toggle), and recall history with ↑/↓.
+  **快捷命令、命令输入框与历史 (#55)。** 终端下方的命令栏:保存命名命令点击即发、
+  命令输入框（含「所有会话」群发开关）、↑/↓ 回溯历史。
+
+- **Remote process monitor (#23).** The server-resource panel gains a "Processes"
+  button that opens a read-only table (PID / user / CPU% / MEM% / command), sorted
+  by CPU and refreshed live.
+  **远端进程监控 (#23)。** 服务器资源面板新增「进程」按钮,打开只读进程表
+  （PID / 用户 / CPU% / 内存% / 命令）,按 CPU 排序、实时刷新。
+
+- **Encrypted private keys (#90).** Key auth now accepts a passphrase for
+  encrypted private keys.
+  **加密私钥 (#90)。** 私钥认证支持为加密私钥输入密码短语。
+
+### Fixed / 修复
+
+- **CJK rendering (#54).** Chinese (especially isolated punctuation like 、：（）)
+  no longer renders as tofu in editable inputs or the terminal — editable fields
+  and the window now use a CJK-capable font, and CJK terminal spans fall back
+  correctly.
+  **中文渲染 (#54)。** 输入框和终端里的中文（尤其「、：（）」这类孤立标点）不再
+  显示为方块——可编辑控件与窗口改用支持 CJK 的字体,终端的 CJK 片段也正确回退。
+
+- **SFTP cd-follow under zsh (#91).** The SFTP panel now follows `cd` under zsh
+  (and other shells), not just bash — the cwd notification is registered via the
+  shell's proper hook instead of bash's `PROMPT_COMMAND` only.
+  **zsh 下 SFTP 跟随 cd (#91)。** SFTP 面板现在在 zsh（及其它 shell）下也能跟随
+  `cd`,不再只支持 bash——按各 shell 正确的钩子注册 cwd 通知。
+
+- **Compact, scrollable session dialog.** Proxy and port-forwarding settings are
+  collapsed under an "Advanced" toggle, and the dialog scrolls instead of being
+  clipped when it would exceed the window.
+  **会话对话框更紧凑、可滚动。** 代理与端口转发收进「高级」折叠;对话框超出窗口
+  时内部滚动而非被截断。
+
+## [0.3.8] - 2026-06-12
+
+### Added / 新增
+
+- **Confirm before closing when there are active sessions (#88).** Double-clicking
+  the title-bar icon (or X / Alt+F4) no longer silently drops live sessions — a
+  confirm dialog appears; with no sessions the window closes as before.
+  **有活动会话时关闭前先确认 (#88)。** 双击标题栏图标(或点 X / Alt+F4)不再静默
+  断开正在进行的会话——会弹出确认框;没有会话时则照旧直接关闭。
+
+- **"Always ask where to save" download option (#87).** Settings → Interface →
+  Download adds a checkbox (default off); when on, every download prompts for the
+  folder instead of using the preset.
+  **「总是询问保存去何处」下载选项 (#87)。** 设置 → 界面 → 下载 新增复选框
+  (默认关闭);勾选后每次下载都询问保存位置,而非直接用预设目录。
+
+- **The transfers popup opens automatically when a download starts**, so progress
+  is visible without opening it by hand.
+  **下载开始时自动弹出传输面板**,无需手动打开即可看到进度。
+
+- **Capped diagnostic log file (groundwork for #86).** Writes to
+  `<config_dir>/error.log` at WARN and above — a single file capped at 5 MiB that
+  auto-overwrites when full — so users can share what went wrong (e.g. a bastion
+  disconnect reason) without setting RUST_LOG.
+  **容量受限的诊断日志文件(为 #86 铺路)。** 写入 `<配置目录>/error.log`
+  (WARN 及以上)——单文件、上限 5 MiB、满了自动覆盖——用户无需设置 RUST_LOG 即可
+  把出错信息(如堡垒机断开原因)发来。
+
+### Fixed / 修复
+
+- **Settings checkboxes now persist visually after reopening the dialog (#87).**
+  "Always ask where to save" and "SFTP follows cd" used a one-way binding, so
+  reopening the settings dialog (without restarting) showed the stale state even
+  though the value was saved; switched to a two-way binding.
+  **设置里的复选框重新打开对话框后状态保持 (#87)。** 「总是询问保存去何处」和
+  「SFTP 跟随 cd」原用单向绑定,不重启 app 时重开设置对话框会显示旧状态(尽管值
+  已保存);改为双向绑定。
+
 ## [0.3.7] - 2026-06-12
 
 ### Added / 新增
@@ -448,6 +877,7 @@ All notable changes are documented here. 本文件记录所有重要变更。
 - **Screenshots in the README** (`docs/screenshots/`, sensitive info redacted).
   **README 增加截图**（`docs/screenshots/`，敏感信息已打码）。
 
+[0.3.8]: https://github.com/jeff141/meatshell/releases/tag/v0.3.8
 [0.3.7]: https://github.com/jeff141/meatshell/releases/tag/v0.3.7
 [0.3.3]: https://github.com/jeff141/meatshell/releases/tag/v0.3.3
 [0.3.2]: https://github.com/jeff141/meatshell/releases/tag/v0.3.2

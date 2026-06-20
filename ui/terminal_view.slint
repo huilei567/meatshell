@@ -3,12 +3,12 @@ import { SftpPanel, SftpEntry, SftpTreeNode } from "sftp_panel.slint";
 import { DiskInfo } from "sidebar.slint";
 
 // Embed the terminal fonts here too so the cell-probe Text below measures
-// with the CORRECT font (Cascadia Mono), not a system fallback.  Font imports
-// in app.slint are globally available in theory, but some Slint builds only
-// register them in the entry-point file's component tree; importing them here
-// guarantees the probe uses Cascadia Mono for its preferred-width calculation.
-import "fonts/CascadiaMono-Regular.ttf";
-import "fonts/CascadiaMono-Bold.ttf";
+// with the CORRECT font (the built-in Meatshell Mono), not a system fallback.
+// Font imports in app.slint are globally available in theory, but some Slint
+// builds only register them in the entry-point file's component tree; importing
+// them here guarantees the probe uses Meatshell Mono for its width calc.
+import "fonts/MeatshellMono-Regular.ttf";
+import "fonts/MeatshellMono-Bold.ttf";
 
 // One coloured run of text on the terminal grid.  The Rust side groups
 // consecutive vt100 cells that share fg + bg + bold into a single span and
@@ -23,6 +23,7 @@ export struct TermSpan {
     row: int,
     col: int,
     cells: int,
+    cjk: bool,   // contains CJK chars → render with the CJK-capable font (#54)
 }
 
 // A find-match highlight rectangle on the terminal grid.
@@ -30,6 +31,12 @@ export struct TermMatch {
     row: int,
     col: int,
     len: int,
+}
+
+// One saved quick command (#55): a name shown on the chip + the text to send.
+export struct QuickCmd {
+    name: string,
+    command: string,
 }
 
 // --- MenuItem --------------------------------------------------------------
@@ -77,6 +84,8 @@ export component TerminalView inherits Rectangle {
     in property <int> cursor-row;       // cursor cell (grid coords)
     in property <int> cursor-col;
     in property <int> rows-used;        // content rows, for viewport sizing
+    in property <int> scroll-max;       // scrollback depth (max offset) (#103)
+    in property <int> scroll-offset;    // current offset (0 = live bottom) (#103)
     in property <bool>   is-alt-screen;
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
@@ -96,13 +105,31 @@ export component TerminalView inherits Rectangle {
     in-out property <bool> sftp-follow-cd: true;
 
     in-out property <length> sftp-panel-height: 220px;
-    property <length> sftp-saved-height: 220px;   // height to restore on un-collapse
-    property <bool>   sftp-collapsed: false;       // SFTP panel minimised (toolbar only)
+    // Shared with the AppWindow (like sftp-panel-height) so a startup default can
+    // collapse the panel and the state stays consistent across tabs (#78).
+    in-out property <length> sftp-saved-height: 220px;   // height to restore on un-collapse
+    in-out property <bool>   sftp-collapsed: false;       // SFTP panel minimised (toolbar only)
     property <length> moba-sftp-width: 280px;
     property <bool> moba-sftp-dragging: false;
     property <length> moba-drag-start-mouse-x: 0px;
     property <string> moba-resource-tip: "";
     property <length> moba-resource-tip-x: 0px;
+
+    // Command bar (#55): quick commands + input box + history (all shared/global,
+    // fed from Rust); send-to-all is a per-tab toggle.
+    in property <[QuickCmd]> quick-commands;
+    in property <[string]> command-history;   // oldest first (newest last, #113)
+    in property <[string]> history-view;       // filtered view shown in the dropdown (#101)
+    property <bool> send-to-all: false;
+    property <bool> quick-open: false;         // quick-command popup visibility
+    property <bool> history-open: false;       // history dropdown visibility
+    property <int> history-cursor: -1;         // ↑/↓ recall index (-1 = live input)
+    callback run-command(string /* cmd */, bool /* to-all */);
+    callback manage-quick-commands();          // open the add/edit/delete dialog
+    callback copy-text(string);                // copy a history command to clipboard (#96)
+    callback delete-history(int /* index */);  // remove a history entry (#96)
+    callback delete-history-cmd(string /* cmd */); // remove a history entry by command (#101)
+    callback search-history(string /* query */);   // filter the history dropdown (#101)
 
     callback send-key(string, bool, bool, bool);
     callback terminal-resize(float, float);
@@ -112,6 +139,10 @@ export component TerminalView inherits Rectangle {
     callback sftp-refresh(string);
     callback sftp-tree-expand(string);
     callback sftp-delete(string);
+    in property <int> sftp-selected-count;          // checked-entry count (#100)
+    callback sftp-toggle-select(int);               // toggle a row's checkbox (#100)
+    callback sftp-download-selected();              // download checked entries (#100)
+    callback sftp-delete-selected();                // delete checked entries (#100)
     callback sftp-view(string);
     callback sftp-edit(string);
     callback sftp-open-external(string);
@@ -128,6 +159,7 @@ export component TerminalView inherits Rectangle {
     callback clear-terminal();              // wipe this session's screen buffer
     callback find-query-changed(string);    // recompute search highlights
     callback terminal-scroll(int);          // scroll history by N lines (+ = up)
+    callback terminal-scroll-to(int);       // jump to an absolute scrollback offset (#103)
     callback select-start(int, int);        // begin drag-selection at (row, col)
     callback select-update(int, int);       // extend drag-selection to (row, col)
     callback select-end();                  // finish selection → copy to clipboard
@@ -163,7 +195,7 @@ export component TerminalView inherits Rectangle {
     // Cell-size probe: must be RENDERED (opacity:0, not visible:false) so Slint
     // resolves the correct embedded font before computing preferred-width/height.
     // visible:false can skip font loading and fall back to a system font (e.g.
-    // Consolas ~6.5 px/char instead of Cascadia Mono ~7.6 px/char), giving a
+    // Consolas ~6.5 px/char instead of Meatshell Mono ~7.6 px/char), giving a
     // cell-w that is too narrow and a term-cols that is too large.
     cell-probe := Text {
         text: "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM"; // exactly 50×M
@@ -219,6 +251,11 @@ export component TerminalView inherits Rectangle {
             // Return to normal mode: pin to the most recent output.
             flickable.viewport-y = flickable.height - flickable.viewport-height;
         }
+    }
+    // Reset the history filter whenever the dropdown opens; the search box itself
+    // is recreated empty because the `if` subtree is destroyed on close (#101).
+    changed history-open => {
+        if (root.history-open) { root.search-history(""); }
     }
     changed visible => {
         if (self.visible) {
@@ -356,6 +393,13 @@ export component TerminalView inherits Rectangle {
 
                 flickable := Flickable {
                     vertical-stretch: 1;
+                    // Non-interactive: a Flickable steals fast drags from child
+                    // TouchAreas for its own flick gesture, which broke quick
+                    // drag-selection (slow drags worked, fast ones selected
+                    // nothing). We scroll via the wheel (scroll-event below →
+                    // terminal-scroll) and pin programmatically, so we don't need
+                    // the Flickable's own drag-scrolling (#119-followup).
+                    interactive: false;
                     viewport-width: self.width;
                     // Alt-screen: lock the viewport to exactly the visible height
                     // so the full-screen program (nano/vim) renders top-aligned
@@ -482,6 +526,10 @@ export component TerminalView inherits Rectangle {
                             width: span.cells * root.cell-w;
                             height: root.cell-h;
                             background: span.bg;
+                            // A wide-CJK span is a single char in a 2-cell box; clip
+                            // it so a glyph whose advance differs from 2×cell-w can't
+                            // bleed over the neighbouring cell / cursor (#60 follow-up).
+                            clip: span.cjk;
                             // Auto-sized Text (no width/height bindings) so its
                             // layout never re-enters parley's FontContext.
                             Text {
@@ -489,7 +537,10 @@ export component TerminalView inherits Rectangle {
                                 y: 0px;
                                 text: span.text;
                                 color: span.fg;
-                                font-family: Theme.term-font-family;
+                                // CJK spans use the CJK-capable UI font: the mono
+                                // terminal font lacks CJK glyphs and Slint tofu's
+                                // *isolated* CJK punctuation (、。,) on fallback (#54).
+                                font-family: span.cjk ? Theme.ui-font-family : Theme.term-font-family;
                                 font-size: Theme.term-font-size;
                                 font-weight: span.bold ? 700 : 400;
                             }
@@ -627,6 +678,40 @@ export component TerminalView inherits Rectangle {
             }
 
             // --- Find bar (overlay, top) ------------------------------------
+            // Terminal scrollbar (#103) — a slim overlay on the right edge of the
+            // output area, shown only when there's scrollback (and not on the
+            // alternate screen). Driven by scroll-max/scroll-offset; click or drag
+            // the track to jump to an absolute position.
+            if root.scroll-max > 0 && !root.is-alt-screen : Rectangle {
+                x: flickable.x + flickable.width - 10px;
+                y: flickable.y + 4px;
+                width: 8px;
+                height: flickable.height - 8px;
+                track-ta := TouchArea {
+                    moved => {
+                        if (self.pressed) {
+                            root.terminal-scroll-to(clamp(round(root.scroll-max * (1 - self.mouse-y / self.height)), 0, root.scroll-max));
+                        }
+                    }
+                    pointer-event(e) => {
+                        if (e.kind == PointerEventKind.down && e.button == PointerEventButton.left) {
+                            root.terminal-scroll-to(clamp(round(root.scroll-max * (1 - self.mouse-y / self.height)), 0, root.scroll-max));
+                        }
+                    }
+                }
+                Rectangle {
+                    property <float> total: root.scroll-max + root.term-rows;
+                    x: 1px;
+                    width: 6px;
+                    height: max(28px, parent.height * root.term-rows / total);
+                    y: (parent.height - self.height) * (root.scroll-max - root.scroll-offset) / max(1, root.scroll-max);
+                    background: track-ta.has-hover || track-ta.pressed
+                        ? Theme.text-secondary : Theme.border-strong;
+                    border-radius: 3px;
+                    animate background { duration: 100ms; }
+                }
+            }
+
             if root.find-active : Rectangle {
                 x: 0;
                 y: 0;
@@ -656,6 +741,7 @@ export component TerminalView inherits Rectangle {
                             width: parent.width - 12px;
                             height: parent.height;
                             color: Theme.text-primary;
+                            font-family: Theme.ui-font-family; // CJK-capable (#54)
                             font-size: Theme.fs-md;
                             vertical-alignment: center;
                             single-line: true;
@@ -694,6 +780,370 @@ export component TerminalView inherits Rectangle {
                             horizontal-alignment: center;
                             vertical-alignment: center;
                         }
+                    }
+                }
+            }
+        }
+
+        // --- Command bar (#55): quick commands + input box + history ---------
+        cmd-bar := Rectangle {
+            height: 34px;
+            background: Theme.bg-panel-alt;
+            border-width: 0;
+
+            // Outside-click backdrop: covers the terminal above so clicking
+            // anywhere out of an open popup dismisses it.
+            if root.quick-open || root.history-open : TouchArea {
+                x: 0; y: -2000px; width: parent.width; height: 2000px;
+                clicked => { root.quick-open = false; root.history-open = false; }
+            }
+
+            HorizontalLayout {
+                padding-left: 8px; padding-right: 8px;
+                padding-top: 4px; padding-bottom: 4px;
+                spacing: 6px;
+
+                // Quick-command toggle.
+                Rectangle {
+                    width: qc-row.preferred-width + 16px;
+                    border-radius: Theme.radius-sm;
+                    background: qc-ta.has-hover || root.quick-open ? Theme.bg-hover : Theme.bg-elevated;
+                    qc-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.history-open = false; root.quick-open = !root.quick-open; }
+                    }
+                    qc-row := HorizontalLayout {
+                        width: parent.width; height: parent.height;
+                        alignment: center;
+                        spacing: 3px;
+                        Text { text: @tr("Quick"); color: Theme.text-secondary; font-size: Theme.fs-sm;
+                               vertical-alignment: center; }
+                        Text { text: "\u{E5CE}"; font-family: "Material Icons"; color: Theme.text-muted;
+                               font-size: Theme.fs-sm; vertical-alignment: center; }
+                    }
+                }
+
+                // Command input.
+                Rectangle {
+                    horizontal-stretch: 1;
+                    border-radius: Theme.radius-sm;
+                    border-width: 1px;
+                    border-color: cmd-input.has-focus ? Theme.accent : Theme.border-subtle;
+                    background: Theme.bg-root;
+                    cmd-input := TextInput {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height;
+                        color: Theme.text-primary;
+                        font-family: Theme.ui-font-family;
+                        font-size: Theme.fs-md;
+                        vertical-alignment: center;
+                        single-line: true;
+                        // Enter sends; ↑/↓ recall history.
+                        accepted => {
+                            root.run-command(self.text, root.send-to-all);
+                            self.text = "";
+                            root.history-cursor = -1;
+                        }
+                        key-pressed(e) => {
+                            if (e.text == Key.UpArrow) {
+                                // Model is oldest→newest (#113): first ↑ jumps to
+                                // the newest (last), further ↑ steps toward older.
+                                if (root.command-history.length > 0) {
+                                    root.history-cursor = root.history-cursor == -1
+                                        ? root.command-history.length - 1
+                                        : max(root.history-cursor - 1, 0);
+                                    self.text = root.command-history[root.history-cursor];
+                                }
+                                accept
+                            } else if (e.text == Key.DownArrow) {
+                                // ↓ steps toward newer; past the newest → live input.
+                                if (root.history-cursor != -1) {
+                                    if (root.history-cursor < root.command-history.length - 1) {
+                                        root.history-cursor += 1;
+                                        self.text = root.command-history[root.history-cursor];
+                                    } else {
+                                        root.history-cursor = -1;
+                                        self.text = "";
+                                    }
+                                }
+                                accept
+                            // --- readline line-editing keys (#103) ---
+                            // Ctrl+A → start of line.
+                            } else if (e.modifiers.control && (e.text == "a" || e.text == "A" || e.text == "\u{0001}")) {
+                                self.set-selection-offsets(0, 0);
+                                accept
+                            // Ctrl+E → end of line.
+                            } else if (e.modifiers.control && (e.text == "e" || e.text == "E" || e.text == "\u{0005}")) {
+                                self.set-selection-offsets(1000000, 1000000);
+                                accept
+                            // Ctrl+K → kill from cursor to end (deletes + clipboard).
+                            } else if (e.modifiers.control && (e.text == "k" || e.text == "K" || e.text == "\u{000B}")) {
+                                self.set-selection-offsets(self.cursor-position_byte-offset, 1000000);
+                                self.cut();
+                                accept
+                            // Ctrl+U → kill from start to cursor.
+                            } else if (e.modifiers.control && (e.text == "u" || e.text == "U" || e.text == "\u{0015}")) {
+                                self.set-selection-offsets(0, self.cursor-position_byte-offset);
+                                self.cut();
+                                accept
+                            } else {
+                                reject
+                            }
+                        }
+                    }
+                    if cmd-input.text == "" : Text {
+                        x: 8px;
+                        height: parent.height;
+                        text: @tr("Type a command, Enter to send");
+                        color: Theme.text-muted;
+                        font-size: Theme.fs-md;
+                        vertical-alignment: center;
+                    }
+                }
+
+                // History toggle.
+                Rectangle {
+                    width: 28px;
+                    border-radius: Theme.radius-sm;
+                    background: hist-ta.has-hover || root.history-open ? Theme.bg-hover : Theme.bg-elevated;
+                    hist-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.quick-open = false; root.history-open = !root.history-open; }
+                    }
+                    Text { text: "\u{E5CE}"; font-family: "Material Icons"; color: Theme.text-secondary;
+                           font-size: Theme.fs-md; horizontal-alignment: center; vertical-alignment: center; }
+                }
+
+                // Send-to-all toggle.
+                Rectangle {
+                    width: all-row.preferred-width + 14px;
+                    border-radius: Theme.radius-sm;
+                    background: root.send-to-all ? Theme.accent
+                              : all-ta.has-hover ? Theme.bg-hover : Theme.bg-elevated;
+                    all-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => { root.send-to-all = !root.send-to-all; }
+                    }
+                    all-row := HorizontalLayout {
+                        width: parent.width; height: parent.height;
+                        alignment: center;
+                        Text { text: @tr("All sessions"); font-size: Theme.fs-sm; vertical-alignment: center;
+                               color: root.send-to-all ? #ffffff : Theme.text-secondary; }
+                    }
+                }
+
+                // Send button.
+                Rectangle {
+                    width: send-row.preferred-width + 18px;
+                    border-radius: Theme.radius-sm;
+                    background: send-ta.has-hover ? Theme.accent-hover : Theme.accent;
+                    send-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            root.run-command(cmd-input.text, root.send-to-all);
+                            cmd-input.text = "";
+                            root.history-cursor = -1;
+                        }
+                    }
+                    send-row := HorizontalLayout {
+                        width: parent.width; height: parent.height;
+                        alignment: center;
+                        Text { text: @tr("Send"); color: #ffffff; font-size: Theme.fs-sm;
+                               vertical-alignment: center; }
+                    }
+                }
+            }
+
+            // --- Quick-command popup (opens upward) --------------------------
+            if root.quick-open : Rectangle {
+                x: 8px;
+                width: 300px;
+                height: min(260px, qc-col.preferred-height + 8px);
+                y: -self.height - 2px;
+                background: Theme.bg-panel;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                drop-shadow-blur: 16px;
+                drop-shadow-color: #00000070;
+                TouchArea {}  // swallow clicks
+                Flickable {
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, qc-col.preferred-height);
+                    qc-col := VerticalLayout {
+                        padding: 4px;
+                        alignment: start;
+                        if root.quick-commands.length == 0 : Text {
+                            text: @tr("No quick commands yet");
+                            color: Theme.text-muted; font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            height: 32px; vertical-alignment: center;
+                        }
+                        for q in root.quick-commands : Rectangle {
+                            height: 34px;
+                            border-radius: Theme.radius-sm;
+                            background: q-item-ta.has-hover ? Theme.bg-hover : transparent;
+                            q-item-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.run-command(q.command, root.send-to-all);
+                                    root.quick-open = false;
+                                }
+                            }
+                            VerticalLayout {
+                                padding-left: 8px; padding-right: 8px;
+                                Text { text: q.name; color: Theme.text-primary; font-size: Theme.fs-sm;
+                                       overflow: elide; }
+                                Text { text: q.command; color: Theme.text-muted; font-size: Theme.fs-xs;
+                                       overflow: elide; font-family: Theme.ui-font-family; }
+                            }
+                        }
+                        // Manage entry.
+                        Rectangle {
+                            height: 30px;
+                            border-radius: Theme.radius-sm;
+                            background: mng-ta.has-hover ? Theme.bg-hover : transparent;
+                            mng-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.quick-open = false; root.manage-quick-commands(); }
+                            }
+                            Text { text: @tr("Manage…"); color: Theme.accent; font-size: Theme.fs-sm;
+                                   horizontal-alignment: center; vertical-alignment: center; }
+                        }
+                    }
+                }
+            }
+
+            // --- History popup (opens upward) -------------------------------
+            if root.history-open : Rectangle {
+                x: parent.width - 308px;
+                width: 300px;
+                height: min(296px, 46px + max(28px, min(228px, h-col.preferred-height + 8px)));
+                y: -self.height - 2px;
+                background: Theme.bg-panel;
+                border-radius: Theme.radius-md;
+                border-width: 1px;
+                border-color: Theme.border-strong;
+                drop-shadow-blur: 16px;
+                drop-shadow-color: #00000070;
+                TouchArea {}
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 4px;
+                    // Search box (#101): filters the list below. ↑/↓ recall in the
+                    // input box still uses the full history.
+                    Rectangle {
+                        height: 30px;
+                        border-radius: Theme.radius-sm;
+                        background: Theme.bg-root;
+                        border-width: 1px;
+                        border-color: hist-search.has-focus ? Theme.accent : Theme.border-subtle;
+                        HorizontalLayout {
+                            padding-left: 8px; padding-right: 8px; spacing: 4px;
+                            Text { text: "\u{E8B6}"; font-family: "Material Icons";
+                                   color: Theme.text-muted; font-size: Theme.fs-sm;
+                                   vertical-alignment: center; }
+                            Rectangle {
+                                horizontal-stretch: 1;
+                                hist-search := TextInput {
+                                    width: 100%; height: 100%;
+                                    vertical-alignment: center;
+                                    color: Theme.text-primary;
+                                    font-family: Theme.ui-font-family;
+                                    font-size: Theme.fs-sm;
+                                    single-line: true;
+                                    edited => { root.search-history(self.text); }
+                                }
+                                if hist-search.text == "" : Text {
+                                    text: @tr("Search history");
+                                    color: Theme.text-muted; font-size: Theme.fs-sm;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                    Flickable {
+                    viewport-width: self.width;
+                    viewport-height: max(self.height, h-col.preferred-height);
+                    h-col := VerticalLayout {
+                        padding: 4px;
+                        alignment: start;
+                        if root.history-view.length == 0 : Text {
+                            text: root.command-history.length == 0 ? @tr("No history yet") : @tr("No match");
+                            color: Theme.text-muted; font-size: Theme.fs-xs;
+                            horizontal-alignment: center;
+                            height: 32px; vertical-alignment: center;
+                        }
+                        for h in root.history-view : Rectangle {
+                            height: 28px;
+                            border-radius: Theme.radius-sm;
+                            background: h-item-ta.has-hover ? Theme.bg-hover : transparent;
+                            // Row body click recalls the command into the input box.
+                            h-item-ta := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    cmd-input.text = h;
+                                    root.history-open = false;
+                                    cmd-input.focus();
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 8px; padding-right: 4px; spacing: 1px;
+                                Text {
+                                    text: h;
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.fs-sm;
+                                    font-family: Theme.ui-font-family;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                // Run (▶) — execute immediately, on this tab.
+                                Rectangle {
+                                    width: 24px; y: (parent.height - self.height) / 2; height: 24px;
+                                    border-radius: Theme.radius-sm;
+                                    background: hrun.has-hover ? Theme.accent.with-alpha(0.25) : transparent;
+                                    hrun := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => {
+                                            root.run-command(h, root.send-to-all);
+                                            root.history-open = false;
+                                        }
+                                    }
+                                    Text { text: "\u{E037}"; font-family: "Material Icons";
+                                           color: Theme.accent; font-size: Theme.fs-md;
+                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                // Copy (⧉) — to clipboard, keep the popup open.
+                                Rectangle {
+                                    width: 24px; y: (parent.height - self.height) / 2; height: 24px;
+                                    border-radius: Theme.radius-sm;
+                                    background: hcopy.has-hover ? Theme.bg-elevated : transparent;
+                                    hcopy := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.copy-text(h); }
+                                    }
+                                    Text { text: "\u{E14D}"; font-family: "Material Icons";
+                                           color: Theme.text-secondary; font-size: Theme.fs-sm;
+                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                                // Delete (×) — remove this entry.
+                                Rectangle {
+                                    width: 24px; y: (parent.height - self.height) / 2; height: 24px;
+                                    border-radius: Theme.radius-sm;
+                                    background: hdel.has-hover ? Theme.danger.with-alpha(0.18) : transparent;
+                                    hdel := TouchArea {
+                                        mouse-cursor: pointer;
+                                        clicked => { root.delete-history-cmd(h); }
+                                    }
+                                    Text { text: "\u{E872}"; font-family: "Material Icons";
+                                           color: Theme.danger; font-size: Theme.fs-sm;
+                                           horizontal-alignment: center; vertical-alignment: center; }
+                                }
+                            }
+                        }
+                    }
                     }
                 }
             }
@@ -742,6 +1192,7 @@ export component TerminalView inherits Rectangle {
             status:        root.sftp-status;
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
+            selected-count: root.sftp-selected-count;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
                     // Restore to the saved height.
@@ -760,6 +1211,9 @@ export component TerminalView inherits Rectangle {
             refresh(path)       => { root.sftp-refresh(path); }
             tree-expand(path)   => { root.sftp-tree-expand(path); }
             delete(path)        => { root.sftp-delete(path); }
+            toggle-select(i)    => { root.sftp-toggle-select(i); }
+            download-selected() => { root.sftp-download-selected(); }
+            delete-selected()   => { root.sftp-delete-selected(); }
             view(path)          => { root.sftp-view(path); }
             edit(path)          => { root.sftp-edit(path); }
             open-external(path) => { root.sftp-open-external(path); }

@@ -96,6 +96,15 @@ msgstr "Private key"
 msgid "Leave blank to keep the current password"
 msgstr "Leave blank to keep the current password"
 
+msgid "Key passphrase"
+msgstr "Key passphrase"
+
+msgid "Leave blank if the key isn't encrypted"
+msgstr "Leave blank if the key isn't encrypted"
+
+msgid "Leave blank to keep the current passphrase"
+msgstr "Leave blank to keep the current passphrase"
+
 msgid "Private key file"
 msgstr "Private key file"
 
@@ -233,6 +242,81 @@ msgstr "Clear buffer"
 
 msgid "Find"
 msgstr "Find"
+
+msgid "Processes"
+msgstr "Processes"
+
+msgid "User"
+msgstr "User"
+
+msgid "Command"
+msgstr "Command"
+
+msgid "No processes"
+msgstr "No processes"
+
+msgid "Quick"
+msgstr "Quick"
+
+msgid "Quick commands"
+msgstr "Quick commands"
+
+msgid "Type a command, Enter to send"
+msgstr "Type a command, Enter to send"
+
+msgid "All sessions"
+msgstr "All sessions"
+
+msgid "Send"
+msgstr "Send"
+
+msgid "No quick commands yet"
+msgstr "No quick commands yet"
+
+msgid "Manage…"
+msgstr "Manage…"
+
+msgid "No history yet"
+msgstr "No history yet"
+
+msgid "e.g. tail log"
+msgstr "e.g. tail log"
+
+msgid "Port forwarding"
+msgstr "Port forwarding"
+
+msgid "Advanced (proxy, tunnels)"
+msgstr "Advanced (proxy, tunnels)"
+
+msgid "Local (-L)"
+msgstr "Local (-L)"
+
+msgid "Remote (-R)"
+msgstr "Remote (-R)"
+
+msgid "Dynamic (-D)"
+msgstr "Dynamic (-D)"
+
+msgid "Listen port"
+msgstr "Listen port"
+
+msgid "Target host"
+msgstr "Target host"
+
+msgid "Target port"
+msgstr "Target port"
+
+msgid "Add"
+msgstr "Add"
+
+msgid "-L: local port → target reached from the server"
+msgstr "-L: local port → target reached from the server"
+
+msgid "-R: server port → target reached from here"
+msgstr "-R: server port → target reached from here"
+
+msgid "-D: local SOCKS5 proxy"
+msgstr "-D: local SOCKS5 proxy"
 
 msgid "meatshell — a lightweight Rust + Slint SSH client by 'lil meatball'"
 msgstr "meatshell — a lightweight Rust + Slint SSH client by 'lil meatball'"

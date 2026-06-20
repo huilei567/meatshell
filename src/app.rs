@@ -7,7 +7,7 @@
 //!   * Route Slint callbacks to the right domain module.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -73,9 +73,10 @@ use crate::config::{AuthMethod, ConfigStore, Secret, Session, SessionKind};
 use crate::i18n::t;
 use crate::sftp::{spawn_sftp, SftpHandle};
 use crate::ssh::{
-    format_mtime, format_size, spawn_session, SessionCommand, SessionEvent, SessionHandle,
+    format_mtime, format_size, spawn_session, ProcInfo, SessionCommand, SessionEvent,
+    SessionHandle,
 };
-use crate::system::{format_bytes_per_sec, format_mem_mib, SystemSampler, SystemSnapshot};
+use crate::system::{format_bytes_per_sec, format_mem, SystemSampler, SystemSnapshot};
 
 type SftpHandles = Arc<Mutex<HashMap<String, SftpHandle>>>;
 /// Per-tab flag: once the user explicitly navigates via the SFTP tree or
@@ -107,6 +108,8 @@ struct TabStatus {
     net_hist: Vec<f32>,
     /// Per-filesystem (mount, available_bytes, total_bytes).
     disks: Vec<(String, u64, u64)>,
+    /// Top remote processes by CPU, for the process monitor popup (#23).
+    procs: Vec<ProcInfo>,
 }
 type TabStatuses = Arc<Mutex<HashMap<String, TabStatus>>>;
 /// Last local-machine sample (shown on the welcome tab).
@@ -153,6 +156,9 @@ pub fn run() -> Result<()> {
     let store = Rc::new(RefCell::new(
         ConfigStore::load().context("failed to load config")?,
     ));
+    // Reachable from the Slint-thread event handler for recording terminal
+    // commands into history (#113).
+    HISTORY_STORE.with(|s| *s.borrow_mut() = Some(store.clone()));
 
     // Per-tab SSH handles (shell only; lives on Slint thread via Rc).
     let handles: Rc<RefCell<HashMap<String, SessionHandle>>> =
@@ -192,6 +198,11 @@ pub fn run() -> Result<()> {
     #[cfg(target_os = "linux")]
     set_window_icon(&window);
 
+    // The window defaults to frameless + custom title bar (#119). macOS keeps
+    // its native decorations, so turn the custom bar off there.
+    #[cfg(target_os = "macos")]
+    window.set_custom_titlebar(false);
+
     // Apply the saved UI language.  The Rust-side flag drives `i18n::t(...)`;
     // `apply_to_slint` selects the bundled `.po` for the static `@tr(...)` text
     // (must run after the first component exists, which it now does).
@@ -225,17 +236,26 @@ pub fn run() -> Result<()> {
             window.set_term_font_family(fam.into());
         }
         window.set_term_font_size(s.font_size() as f32);
+        window.set_ui_scale(s.ui_scale() as f32 / 100.0); // global UI zoom (#100)
     }
     // Editable inputs (e.g. the SFTP path bar) need a CJK-capable font: the
-    // embedded Cascadia Mono has no Chinese glyphs and native TextInput doesn't
+    // embedded mono font has no Chinese glyphs and native TextInput doesn't
     // glyph-fallback like Text does, so typed Chinese would render as tofu (#54).
-    #[cfg(target_os = "windows")]
-    window.set_ui_font_family("Microsoft YaHei UI".into());
-    #[cfg(target_os = "macos")]
-    window.set_ui_font_family("PingFang SC".into());
-    // Linux: leave the Slint default (Noto Sans CJK is typically installed).
+    //
+    // We must NOT hard-code one system font name: on macOS 26 (Tahoe) fontdb
+    // failed to register "PingFang SC", so the UI default font resolved to nothing
+    // and *all* text vanished (#129) — icons survived only because they use an
+    // embedded font. Instead probe what fontdb actually loaded and pick the first
+    // resolvable CJK family, falling back to the embedded "Meatshell Mono" so the
+    // window is never fully blank even when the system font DB is unreadable.
+    window.set_ui_font_family(resolve_ui_font_family());
     // Populate the Interface font picker with installed monospace families.
     window.set_term_fonts(ModelRc::from(Rc::new(VecModel::from(system_monospace_fonts()))));
+
+    // Command bar (#55): seed quick commands + history from the config.
+    window.set_quick_commands(quick_cmd_model(&store.borrow()));
+    window.set_command_history(history_model(&store.borrow()));
+    window.set_history_view(history_view_model(&store.borrow(), "")); // #101
 
     // Interface setting: SFTP follows the terminal's cd. The shell event pumps
     // read this AtomicBool on every CwdChanged, so toggling applies live to
@@ -276,6 +296,64 @@ pub fn run() -> Result<()> {
         });
     }
 
+    // Interface setting: always ask where to save on download (#87). Read live
+    // by the download handler from the window property, so just set + persist.
+    window.set_download_always_ask(store.borrow().download_always_ask());
+    {
+        let store = store.clone();
+        window.on_set_download_always_ask(move |ask| {
+            let mut s = store.borrow_mut();
+            s.set_download_always_ask(ask);
+            let _ = s.save();
+        });
+    }
+
+    // Interface setting: collapse the sidebars by default (#78). Seed the
+    // checkboxes, apply the collapsed state once at startup, and persist toggles.
+    {
+        let s = store.borrow();
+        let collapse_sidebar = s.collapse_sidebar_default();
+        let collapse_sftp = s.collapse_sftp_default();
+        window.set_collapse_sidebar_default(collapse_sidebar);
+        window.set_collapse_sftp_default(collapse_sftp);
+        if collapse_sidebar {
+            window.set_sidebar_collapsed(true);
+        }
+        if collapse_sftp {
+            window.set_sftp_collapsed(true);
+            window.set_sftp_saved_height(220.0);
+            window.set_sftp_panel_height(30.0);
+        }
+    }
+    {
+        let store = store.clone();
+        window.on_set_collapse_sidebar_default(move |v| {
+            let mut s = store.borrow_mut();
+            s.set_collapse_sidebar_default(v);
+            let _ = s.save();
+        });
+    }
+    {
+        let store = store.clone();
+        window.on_set_collapse_sftp_default(move |v| {
+            let mut s = store.borrow_mut();
+            s.set_collapse_sftp_default(v);
+            let _ = s.save();
+        });
+    }
+
+    // Session-sync upload setting (#sync). Persisted; only has effect while the
+    // session-sync toggle is on. Read live from the window in the upload handler.
+    window.set_sync_upload_enabled(store.borrow().sync_upload());
+    {
+        let store = store.clone();
+        window.on_set_sync_upload_enabled(move |v| {
+            let mut s = store.borrow_mut();
+            s.set_sync_upload(v);
+            let _ = s.save();
+        });
+    }
+
     // Interface settings: apply + persist the terminal font family / size.
     {
         let weak = window.as_weak();
@@ -302,6 +380,22 @@ pub fn run() -> Result<()> {
             }
             if let Some(w) = weak.upgrade() {
                 w.set_term_font_size(size as f32);
+            }
+        });
+    }
+    // Global UI scale (#100): persist the percent and apply it live.
+    {
+        let weak = window.as_weak();
+        let store = store.clone();
+        window.on_set_ui_scale(move |percent: i32| {
+            let clamped = (percent.max(0) as u32).clamp(80, 200);
+            {
+                let mut s = store.borrow_mut();
+                s.set_ui_scale(clamped);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_ui_scale(clamped as f32 / 100.0);
             }
         });
     }
@@ -425,6 +519,45 @@ pub fn run() -> Result<()> {
         });
     }
 
+    // Host-key confirmation dialog (#109-5): the user trusts or rejects the
+    // presented server key; the decision fans back out to the blocked SSH/SFTP
+    // handler(s) and the next queued prompt (if any) is shown.
+    {
+        let weak = window.as_weak();
+        window.on_hostkey_accept(move || {
+            if let Some(w) = weak.upgrade() {
+                resolve_front_hostkey(&w, true);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_hostkey_reject(move || {
+            if let Some(w) = weak.upgrade() {
+                resolve_front_hostkey(&w, false);
+            }
+        });
+    }
+
+    // Connect-time credential prompt (#110): the user supplies the missing
+    // username/password (or cancels); the answer unblocks the SSH/SFTP auth.
+    {
+        let weak = window.as_weak();
+        window.on_cred_accept(move || {
+            if let Some(w) = weak.upgrade() {
+                resolve_front_cred(&w, true);
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_cred_reject(move || {
+            if let Some(w) = weak.upgrade() {
+                resolve_front_cred(&w, false);
+            }
+        });
+    }
+
     // NIC selector: remember the user's choice for the active tab and refresh.
     {
         let weak = window.as_weak();
@@ -545,6 +678,19 @@ pub fn run() -> Result<()> {
         let tm = transfers_model.clone();
         window.on_clear_transfers(move || tm.set_vec(Vec::<TransferInfo>::new()));
     }
+    {
+        // Cancel a transfer by id. The id is a UUID unique across sessions, so we
+        // broadcast to every SFTP handle — only the owning one has it registered
+        // and will act on it (#100).
+        let sftp_handles = sftp_handles.clone();
+        window.on_cancel_transfer(move |id: SharedString| {
+            if let Ok(handles) = sftp_handles.lock() {
+                for h in handles.values() {
+                    h.cancel_transfer(id.to_string());
+                }
+            }
+        });
+    }
 
     // Open-source libraries shown in the About popup.
     {
@@ -650,13 +796,114 @@ pub fn run() -> Result<()> {
         use i_slint_backend_winit::EventResult;
         let weak = window.as_weak();
         let sh = sftp_handles.clone();
+        let close_handles = handles.clone();
         window.window().on_winit_window_event(move |_w, event| {
-            if let WEvent::DroppedFile(path) = event {
-                if let Some(win) = weak.upgrade() {
-                    handle_file_drop(&win, &sh, path.to_string_lossy().to_string());
+            match event {
+                WEvent::DroppedFile(path) => {
+                    if let Some(win) = weak.upgrade() {
+                        handle_file_drop(&win, &sh, path.to_string_lossy().to_string());
+                    }
                 }
+                WEvent::Resized(_) => {
+                    // Keep the maximize/restore icon (and resize-edge gating) in
+                    // sync when the OS changes the window state (#119).
+                    if let Some(win) = weak.upgrade() {
+                        let maxed = win
+                            .window()
+                            .with_winit_window(|ww| ww.is_maximized())
+                            .unwrap_or(false);
+                        win.set_window_maximized(maxed);
+                    }
+                }
+                WEvent::CloseRequested => {
+                    // Confirm before closing if there are open session tabs (#88),
+                    // so a stray double-click on the title-bar icon / X / Alt+F4
+                    // doesn't silently drop live sessions. The confirm dialog's
+                    // "Close" calls quit_event_loop to actually exit.
+                    if !close_handles.borrow().is_empty() {
+                        if let Some(win) = weak.upgrade() {
+                            win.set_confirm_close_open(true);
+                        }
+                        return EventResult::PreventDefault;
+                    }
+                }
+                _ => {}
             }
             EventResult::Propagate
+        });
+    }
+    // Confirm-close dialog "Close" → actually quit the event loop (#88).
+    window.on_confirm_close_yes(|| {
+        let _ = slint::quit_event_loop();
+    });
+
+    // --- Custom title-bar window controls (#119) --------------------------
+    {
+        let weak = window.as_weak();
+        window.on_win_minimize(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| ww.set_minimized(true));
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_win_maximize_toggle(move || {
+            if let Some(w) = weak.upgrade() {
+                let now = w.window().with_winit_window(|ww| {
+                    let m = !ww.is_maximized();
+                    ww.set_maximized(m);
+                    m
+                });
+                if let Some(m) = now {
+                    w.set_window_maximized(m);
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        let close_handles = handles.clone();
+        window.on_win_close(move || {
+            if let Some(w) = weak.upgrade() {
+                // Mirror the native-X behaviour: confirm if sessions are open.
+                if close_handles.borrow().is_empty() {
+                    let _ = slint::quit_event_loop();
+                } else {
+                    w.set_confirm_close_open(true);
+                }
+            }
+        });
+    }
+    {
+        let weak = window.as_weak();
+        window.on_win_drag(move || {
+            if let Some(w) = weak.upgrade() {
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_window();
+                });
+            }
+        });
+    }
+    {
+        use i_slint_backend_winit::winit::window::ResizeDirection;
+        let weak = window.as_weak();
+        window.on_win_resize(move |dir: i32| {
+            if let Some(w) = weak.upgrade() {
+                let d = match dir {
+                    0 => ResizeDirection::North,
+                    1 => ResizeDirection::South,
+                    2 => ResizeDirection::East,
+                    3 => ResizeDirection::West,
+                    4 => ResizeDirection::NorthEast,
+                    5 => ResizeDirection::NorthWest,
+                    6 => ResizeDirection::SouthEast,
+                    _ => ResizeDirection::SouthWest,
+                };
+                w.window().with_winit_window(|ww| {
+                    let _ = ww.drag_resize_window(d);
+                });
+            }
         });
     }
 
@@ -786,9 +1033,24 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: String) {
     if dir.is_empty() {
         return;
     }
+    // Session-sync (#sync): when both toggles are on, also mirror the drop to
+    // every other online session — each into *its own* current SFTP dir. This
+    // matches the upload button's behaviour (drag-and-drop is a separate path).
+    let sync = win.get_sync_input() && win.get_sync_upload_enabled();
+    let other_dirs = if sync { terminal_sftp_paths(win) } else { HashMap::new() };
     if let Ok(handles) = sftp_handles.lock() {
         if let Some(h) = handles.get(&active) {
-            h.upload(path, dir);
+            h.upload(path.clone(), dir);
+        }
+        if sync {
+            for (id, h) in handles.iter() {
+                if id == &active {
+                    continue;
+                }
+                if let Some(d) = other_dirs.get(id).filter(|d| !d.is_empty()) {
+                    h.upload(path.clone(), d.clone());
+                }
+            }
         }
     }
 }
@@ -906,16 +1168,27 @@ fn wire_session_callbacks(
     local_net_hist: NetHist,
     sftp_follow_cd: Arc<std::sync::atomic::AtomicBool>,
 ) {
+    // Working set of port forwards (#56) for the session being created/edited.
+    // The forward add/delete callbacks mutate it; saving reads it into
+    // Session.forwards; opening the dialog (new/edit) resets it.
+    let edit_forwards: Rc<RefCell<Vec<crate::config::PortForward>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
     // New session -> open dialog with blank draft.
     let weak = window.as_weak();
+    let ef_new = edit_forwards.clone();
     window.on_new_session_clicked(move || {
         if let Some(w) = weak.upgrade() {
+            ef_new.borrow_mut().clear();
+            w.set_dialog_forwards(forward_model(&[]));
             let empty = Session::new_empty();
             w.set_dialog_id(empty.id.into());
             w.set_dialog_name("".into());
             w.set_dialog_host("".into());
             w.set_dialog_port("22".into());
-            w.set_dialog_user("root".into());
+            // No default username (#110): leaving it blank makes the connect-time
+            // prompt ask for it, Xshell-style.
+            w.set_dialog_user("".into());
             w.set_dialog_auth("password".into());
             w.set_dialog_password("".into());
             w.set_dialog_key_path("".into());
@@ -1049,11 +1322,14 @@ fn wire_session_callbacks(
     {
         let weak = window.as_weak();
         let store = store.clone();
+        let ef_edit = edit_forwards.clone();
         window.on_edit_session(move |id: SharedString| {
             let id = id.to_string();
             let store = store.borrow();
             let Some(session) = store.get(&id) else { return; };
+            *ef_edit.borrow_mut() = session.forwards.clone();
             if let Some(w) = weak.upgrade() {
+                w.set_dialog_forwards(forward_model(&session.forwards));
                 w.set_dialog_id(session.id.clone().into());
                 w.set_dialog_name(session.name.clone().into());
                 w.set_dialog_host(session.host.clone().into());
@@ -1239,6 +1515,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let edit_forwards = edit_forwards.clone();
         window.on_session_dialog_submit(move |draft: SessionDraft| {
             let id = draft.id.to_string();
             // The edit dialog never echoes the real password (issue #10): a blank
@@ -1254,11 +1531,13 @@ fn wire_session_callbacks(
                 Secret::new(draft.password.to_string())
             };
             let kind = crate::config::SessionKind::from_str(&draft.kind.to_string());
-            // Auto-name: serial → port label, otherwise user@host.
+            // Auto-name: serial → port label; otherwise user@host, or just the
+            // host when no username was given (#110).
             let auto_name = match kind {
                 crate::config::SessionKind::Serial => {
                     format!("{} @{}", draft.serial_port, draft.baud_rate)
                 }
+                _ if draft.user.trim().is_empty() => draft.host.to_string(),
                 _ => format!("{}@{}", draft.user, draft.host),
             };
             // Telnet defaults to port 23, SSH to 22; serial ignores port.
@@ -1299,6 +1578,7 @@ fn wire_session_callbacks(
                 stop_bits: draft.stop_bits as u8,
                 parity: draft.parity.to_string(),
                 flow_control: draft.flow_control.to_string(),
+                forwards: edit_forwards.borrow().clone(),
             };
             {
                 let mut s = store.borrow_mut();
@@ -1341,6 +1621,57 @@ fn wire_session_callbacks(
                 if let Some(w) = weak.upgrade() {
                     w.set_dialog_key_path(path.into());
                 }
+            }
+        });
+    }
+
+    // Add a port forward to the session being edited (#56).
+    {
+        let weak = window.as_weak();
+        let ef = edit_forwards.clone();
+        window.on_add_forward(
+            move |name: SharedString,
+                  kind: SharedString,
+                  bind_addr: SharedString,
+                  bind_port: i32,
+                  host: SharedString,
+                  host_port: i32| {
+                let kind = kind.to_string();
+                // Local/remote need a target host; dynamic doesn't.
+                if bind_port <= 0 || bind_port > 65535 {
+                    return;
+                }
+                if kind != "dynamic" && (host.trim().is_empty() || host_port <= 0) {
+                    return;
+                }
+                ef.borrow_mut().push(crate::config::PortForward {
+                    kind,
+                    name: name.trim().to_string(),
+                    bind_addr: bind_addr.trim().to_string(),
+                    bind_port: bind_port as u16,
+                    host: host.trim().to_string(),
+                    host_port: host_port.max(0) as u16,
+                });
+                if let Some(w) = weak.upgrade() {
+                    w.set_dialog_forwards(forward_model(&ef.borrow()));
+                }
+            },
+        );
+    }
+    // Delete a port forward by index (#56).
+    {
+        let weak = window.as_weak();
+        let ef = edit_forwards.clone();
+        window.on_delete_forward(move |index: i32| {
+            let i = index as usize;
+            {
+                let mut v = ef.borrow_mut();
+                if i < v.len() {
+                    v.remove(i);
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_dialog_forwards(forward_model(&ef.borrow()));
             }
         });
     }
@@ -1408,6 +1739,8 @@ fn wire_session_callbacks(
                 cursor_row: 0,
                 cursor_col: 0,
                 rows_used: 0,
+                scroll_max: 0,
+                scroll_offset: 0,
                 is_alt_screen: false,
                 find_matches: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
                 selection: ModelRc::from(std::rc::Rc::new(VecModel::<TermMatch>::default())),
@@ -1424,6 +1757,7 @@ fn wire_session_callbacks(
                 sftp_tree_nodes: ModelRc::from(
                     std::rc::Rc::new(VecModel::<SftpTreeNode>::default()),
                 ),
+                sftp_selected_count: 0,
             });
             // Create vt100 parser for this tab (default 24×80; resized on first
             // terminal-resize callback). 5000-line scrollback is stored for
@@ -1642,6 +1976,22 @@ fn start_session_in_tab(tab_id: &str, session: Session, ctx: &ConnectCtx) {
     }
 }
 
+/// Map of tab-id → the SFTP panel's current path, read from the terminals
+/// model. Used as the per-session fallback dir for session-sync uploads.
+fn terminal_sftp_paths(w: &AppWindow) -> HashMap<String, String> {
+    use slint::Model as _;
+    let mut out = HashMap::new();
+    let model = w.get_terminals();
+    if let Some(terminals) = model.as_any().downcast_ref::<VecModel<TerminalState>>() {
+        for i in 0..terminals.row_count() {
+            if let Some(row) = terminals.row_data(i) {
+                out.insert(row.id.to_string(), row.sftp_path.to_string());
+            }
+        }
+    }
+    out
+}
+
 /// Push a value into a fixed-length ring buffer (newest at the end).
 fn push_ring(buf: &mut Vec<f32>, val: f32) {
     if buf.len() != NET_HISTORY_LEN {
@@ -1676,6 +2026,134 @@ fn disk_model(disks: &[(String, u64, u64)]) -> ModelRc<DiskInfo> {
                 percent,
             }
         })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the process-monitor model for the popup (#23). `cpu`/`mem` are
+/// pre-formatted to one decimal; `cpu_frac` (0..1) drives the row's load bar.
+fn proc_model(procs: &[ProcInfo]) -> ModelRc<ProcRow> {
+    let rows: Vec<ProcRow> = procs
+        .iter()
+        .map(|p| ProcRow {
+            pid: p.pid.to_string().into(),
+            user: p.user.clone().into(),
+            cpu: format!("{:.1}", p.cpu).into(),
+            mem: format!("{:.1}", p.mem).into(),
+            command: p.command.clone().into(),
+            cpu_frac: (p.cpu / 100.0).clamp(0.0, 1.0),
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the quick-command model for the command bar + manage dialog (#55).
+fn quick_cmd_model(store: &ConfigStore) -> ModelRc<QuickCmd> {
+    let rows: Vec<QuickCmd> = store
+        .quick_commands()
+        .iter()
+        .map(|q| QuickCmd {
+            name: q.name.clone().into(),
+            command: q.command.clone().into(),
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the port-forward list model for the session dialog (#56). Each row is
+/// a one-line human summary (`-L 127.0.0.1:8080 → host:80`).
+fn forward_model(forwards: &[crate::config::PortForward]) -> ModelRc<PortFwd> {
+    let rows: Vec<PortFwd> = forwards
+        .iter()
+        .map(|f| {
+            let bind = if f.bind_addr.trim().is_empty() {
+                "127.0.0.1"
+            } else {
+                f.bind_addr.trim()
+            };
+            let summary = match f.kind.as_str() {
+                "local" => format!("-L {}:{} → {}:{}", bind, f.bind_port, f.host, f.host_port),
+                "remote" => format!("-R {}:{} → {}:{}", bind, f.bind_port, f.host, f.host_port),
+                "dynamic" => format!("-D {}:{} (SOCKS5)", bind, f.bind_port),
+                _ => String::new(),
+            };
+            PortFwd {
+                kind: f.kind.clone().into(),
+                name: f.name.clone().into(),
+                summary: summary.into(),
+            }
+        })
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Collect the full paths of the checked SFTP entries for a tab (#100).
+fn collect_sftp_selected(terminals: &VecModel<TerminalState>, tab_id: &str) -> Vec<String> {
+    let mut paths = Vec::new();
+    for ti in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(ti) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+            for ei in 0..em.row_count() {
+                if let Some(e) = em.row_data(ei) {
+                    if e.selected {
+                        paths.push(e.full_path.to_string());
+                    }
+                }
+            }
+        }
+        break;
+    }
+    paths
+}
+
+/// Uncheck every SFTP entry for a tab and reset its selected-count (#100).
+fn clear_sftp_selection(terminals: &VecModel<TerminalState>, tab_id: &str) {
+    for ti in 0..terminals.row_count() {
+        let Some(row) = terminals.row_data(ti) else { continue };
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+            for ei in 0..em.row_count() {
+                if let Some(mut e) = em.row_data(ei) {
+                    if e.selected {
+                        e.selected = false;
+                        em.set_row_data(ei, e);
+                    }
+                }
+            }
+        }
+        let mut r = row.clone();
+        r.sftp_selected_count = 0;
+        terminals.set_row_data(ti, r);
+        break;
+    }
+}
+
+/// Build the command-history model in storage order (oldest first, newest
+/// last). The dropdown shows the most-recently-used command at the bottom
+/// (nearest the input) and ↑ recalls it first (#55, #113).
+fn history_model(store: &ConfigStore) -> ModelRc<SharedString> {
+    let rows: Vec<SharedString> = store
+        .command_history()
+        .iter()
+        .map(|s| s.clone().into())
+        .collect();
+    ModelRc::from(Rc::new(VecModel::from(rows)))
+}
+
+/// Build the filtered history-view model for the dropdown: case-insensitive
+/// substring matches of `query`, in the same order as the full history (#101).
+fn history_view_model(store: &ConfigStore, query: &str) -> ModelRc<SharedString> {
+    let q = query.trim().to_lowercase();
+    let rows: Vec<SharedString> = store
+        .command_history()
+        .iter()
+        .filter(|c| q.is_empty() || c.to_lowercase().contains(&q))
+        .map(|s| s.clone().into())
         .collect();
     ModelRc::from(Rc::new(VecModel::from(rows)))
 }
@@ -1728,6 +2206,7 @@ fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
     let fm = ModelRc::from(Rc::new(VecModel::from(matches)));
     let sm = ModelRc::from(Rc::new(VecModel::from(sel)));
     let (cr, cc, ru, alt) = (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+    let (smax, soff) = (b.scroll_max, b.scroll_offset);
     set_terminal_row(win, tab_id, move |row| {
         row.spans = spans.clone();
         row.cursor_row = cr;
@@ -1736,6 +2215,8 @@ fn rebuild_tab_display(win: &AppWindow, bufs: &TermBuffers, tab_id: &str) {
         row.is_alt_screen = alt;
         row.find_matches = fm.clone();
         row.selection = sm.clone();
+        row.scroll_max = smax;
+        row.scroll_offset = soff;
     });
 }
 
@@ -1790,8 +2271,8 @@ fn refresh_sidebar(
         win.set_cpu_percent(snap.cpu_percent);
         win.set_mem_percent(snap.mem_percent);
         win.set_swap_percent(snap.swap_percent);
-        win.set_mem_detail(format_mem_mib(snap.mem_used_mib, snap.mem_total_mib).into());
-        win.set_swap_detail(format_mem_mib(snap.swap_used_mib, snap.swap_total_mib).into());
+        win.set_mem_detail(format_mem(snap.mem_used_mib, snap.mem_total_mib).into());
+        win.set_swap_detail(format_mem(snap.swap_used_mib, snap.swap_total_mib).into());
     };
     let clear_stats = |win: &AppWindow| {
         win.set_cpu_percent(0.0);
@@ -1800,6 +2281,11 @@ fn refresh_sidebar(
         win.set_mem_detail("".into());
         win.set_swap_detail("".into());
     };
+
+    // Process monitor (#23) only applies to a live remote session; default to
+    // hidden/empty and let the connected branch below fill it in.
+    win.set_proc_available(false);
+    win.set_proc_list(ModelRc::from(Rc::new(VecModel::<ProcRow>::default())));
 
     let active = win.get_active_tab_id().to_string();
     let status = if active == "welcome" {
@@ -1818,10 +2304,10 @@ fn refresh_sidebar(
             win.set_mem_percent(pct(st.mem_used_kib, st.mem_total_kib));
             win.set_swap_percent(pct(st.swap_used_kib, st.swap_total_kib));
             win.set_mem_detail(
-                format_mem_mib(st.mem_used_kib / 1024, st.mem_total_kib / 1024).into(),
+                format_mem(st.mem_used_kib / 1024, st.mem_total_kib / 1024).into(),
             );
             win.set_swap_detail(
-                format_mem_mib(st.swap_used_kib / 1024, st.swap_total_kib / 1024).into(),
+                format_mem(st.swap_used_kib / 1024, st.swap_total_kib / 1024).into(),
             );
             let (name, rx, tx) = selected_iface(&st);
             win.set_net_top_up(format_bytes_per_sec(tx).into());
@@ -1833,6 +2319,8 @@ fn refresh_sidebar(
                 st.net.iter().map(|e| e.0.clone().into()).collect();
             win.set_net_ifaces(ModelRc::from(Rc::new(VecModel::from(ifaces))));
             win.set_disks(disk_model(&st.disks));
+            win.set_proc_available(true);
+            win.set_proc_list(proc_model(&st.procs));
         }
         // Disconnected / timed-out session.
         Some(st) if st.state == 2 => {
@@ -1940,6 +2428,7 @@ fn apply_session_event_to_window(
                     ModelRc::from(std::rc::Rc::new(VecModel::from(sel)));
                 let (cur_row, cur_col, rows_used, is_alt) =
                     (b.cursor_row, b.cursor_col, b.rows_used, b.is_alt);
+                let (smax, soff) = (b.scroll_max, b.scroll_offset);
                 update_terminal(&|t| {
                     t.spans = spans_model.clone();
                     t.cursor_row = cur_row;
@@ -1948,6 +2437,8 @@ fn apply_session_event_to_window(
                     t.is_alt_screen = is_alt;
                     t.find_matches = matches_model.clone();
                     t.selection = sel_model.clone();
+                    t.scroll_max = smax;
+                    t.scroll_offset = soff;
                 });
             }
         }
@@ -1996,6 +2487,7 @@ fn apply_session_event_to_window(
             swap_total_kib,
             net,
             disks,
+            procs,
         } => {
             if let Some(st) = statuses.lock().unwrap().get_mut(tab_id) {
                 st.cpu = cpu_percent;
@@ -2005,6 +2497,7 @@ fn apply_session_event_to_window(
                 st.swap_total_kib = swap_total_kib;
                 st.net = net;
                 st.disks = disks;
+                st.procs = procs;
                 // A sample means the channel is alive → treat as connected.
                 if st.state != 1 {
                     st.state = 1;
@@ -2041,6 +2534,7 @@ fn apply_session_event_to_window(
                     },
                     modified: format_mtime(e.modified).into(),
                     mode: (e.mode & 0o7777) as i32,
+                    selected: false,
                 })
                 .collect();
             let model = ModelRc::from(
@@ -2054,6 +2548,14 @@ fn apply_session_event_to_window(
         }
         SessionEvent::SftpStatus(msg) => {
             update_terminal(&|t| t.sftp_status = msg.clone().into());
+        }
+        SessionEvent::SftpError(msg) => {
+            // Show the reason and stop the spinner; leave the current listing in
+            // place so a failed navigation doesn't blank the panel (#112).
+            update_terminal(&|t| {
+                t.sftp_status = msg.clone().into();
+                t.sftp_loading = false;
+            });
         }
         SessionEvent::SftpFileText {
             path,
@@ -2119,6 +2621,10 @@ fn apply_session_event_to_window(
                 // On error, show the actual message when we have one.
                 2 => if msg.is_empty() { t("失败", "Failed").to_string() } else { msg },
                 1 => t("已完成", "Done").to_string(),
+                // Remote-side prep (e.g. tar packing) before bytes start flowing (#100).
+                3 => t("文件准备中", "Preparing...").to_string(),
+                // User-cancelled transfer (#100).
+                4 => t("已取消", "Cancelled").to_string(),
                 _ => {
                     if total > 0 {
                         format!("{}/{}", format_size(transferred), format_size(total))
@@ -2162,7 +2668,327 @@ fn apply_session_event_to_window(
                 }
             }
         }
+        SessionEvent::HostKeyPrompt {
+            host,
+            port,
+            key_type,
+            fingerprint,
+            changed,
+            responder,
+        } => {
+            enqueue_hostkey_prompt(win, host, port, key_type, fingerprint, changed, responder);
+        }
+        SessionEvent::CredentialPrompt {
+            session_id,
+            host,
+            user,
+            need_user,
+            need_password,
+            responder,
+        } => {
+            enqueue_cred_prompt(win, session_id, host, user, need_user, need_password, responder);
+        }
+        SessionEvent::CommandRan(cmd) => {
+            // A command typed directly in the terminal, captured via the shell
+            // hook (#113). Record it in the same command-box history, reusing the
+            // de-dup/move-to-end logic, and refresh the model.
+            HISTORY_STORE.with(|s| {
+                if let Some(store) = s.borrow().as_ref() {
+                    {
+                        let mut st = store.borrow_mut();
+                        st.push_command_history(cmd);
+                        let _ = st.save();
+                    }
+                    win.set_command_history(history_model(&store.borrow()));
+                }
+            });
+        }
     }
+}
+
+thread_local! {
+    /// The config store, made reachable from the Slint-thread event handler so
+    /// terminal-captured commands (#113) can be appended to history. Set once at
+    /// startup; only touched on the Slint event-loop thread.
+    static HISTORY_STORE: RefCell<Option<Rc<RefCell<ConfigStore>>>> = const { RefCell::new(None) };
+}
+
+// ---------------------------------------------------------------------------
+// Host-key confirmation (#109-5)
+// ---------------------------------------------------------------------------
+
+/// One queued host-key prompt. Multiple connections to the *same* host:port
+/// (e.g. the shell and its SFTP channel racing on first connect) collapse into
+/// a single dialog whose answer fans out to every waiting `responder`.
+struct PendingHostKey {
+    host: String,
+    port: u16,
+    changed: bool,
+    title: String,
+    message: String,
+    detail: String,
+    confirm_label: String,
+    responders: Vec<crate::ssh::HostKeyResponder>,
+}
+
+thread_local! {
+    /// Prompts awaiting a decision; the front one is shown. Lives on the Slint
+    /// event-loop thread (all access is from there).
+    static HOSTKEY_QUEUE: RefCell<VecDeque<PendingHostKey>> = RefCell::new(VecDeque::new());
+    /// host:port → decision, remembered for this run so a duplicate prompt
+    /// (second connection to the same host) is answered without a new dialog.
+    static HOSTKEY_DECIDED: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+/// Localized title / message / detail / confirm-label for the host-key dialog.
+fn hostkey_dialog_text(
+    host: &str,
+    port: u16,
+    key_type: &str,
+    fingerprint: &str,
+    changed: bool,
+) -> (String, String, String, String) {
+    let detail = format!("{host}:{port}  ({key_type})\n{fingerprint}");
+    if changed {
+        (
+            crate::i18n::t("⚠ 主机密钥已改变", "⚠ Host key changed").to_string(),
+            crate::i18n::t(
+                "该主机的密钥与之前记录的不一致,可能存在中间人攻击。仅当你确知服务器密钥已更换时才继续。",
+                "This host's key differs from the one stored earlier — this could be a man-in-the-middle attack. Only continue if you know the server's key really changed.",
+            )
+            .to_string(),
+            detail,
+            crate::i18n::t("仍然信任", "Trust anyway").to_string(),
+        )
+    } else {
+        (
+            crate::i18n::t("未知主机", "Unknown host").to_string(),
+            crate::i18n::t(
+                "首次连接该主机。请核对下面的密钥指纹,确认无误后再信任并连接。",
+                "First time connecting to this host. Verify the key fingerprint below before you trust and connect.",
+            )
+            .to_string(),
+            detail,
+            crate::i18n::t("信任并连接", "Trust & connect").to_string(),
+        )
+    }
+}
+
+/// Queue a host-key prompt: answer immediately if already decided this run,
+/// merge into an existing pending entry for the same host, otherwise enqueue
+/// (and show it now if nothing else is up).
+fn enqueue_hostkey_prompt(
+    win: &AppWindow,
+    host: String,
+    port: u16,
+    key_type: String,
+    fingerprint: String,
+    changed: bool,
+    responder: crate::ssh::HostKeyResponder,
+) {
+    let id = format!("{host}:{port}");
+    if let Some(ans) = HOSTKEY_DECIDED.with(|d| d.borrow().get(&id).copied()) {
+        responder.respond(ans);
+        return;
+    }
+    let show_now = HOSTKEY_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if let Some(p) = q.iter_mut().find(|p| p.host == host && p.port == port) {
+            p.responders.push(responder);
+            return false;
+        }
+        let was_empty = q.is_empty();
+        let (title, message, detail, confirm_label) =
+            hostkey_dialog_text(&host, port, &key_type, &fingerprint, changed);
+        q.push_back(PendingHostKey {
+            host,
+            port,
+            changed,
+            title,
+            message,
+            detail,
+            confirm_label,
+            responders: vec![responder],
+        });
+        was_empty
+    });
+    if show_now {
+        show_front_hostkey(win);
+    }
+}
+
+/// Push the front pending prompt's details into the window and open the dialog.
+fn show_front_hostkey(win: &AppWindow) {
+    HOSTKEY_QUEUE.with(|q| {
+        if let Some(p) = q.borrow().front() {
+            win.set_hostkey_changed(p.changed);
+            win.set_hostkey_title(p.title.clone().into());
+            win.set_hostkey_message(p.message.clone().into());
+            win.set_hostkey_detail(p.detail.clone().into());
+            win.set_hostkey_confirm_label(p.confirm_label.clone().into());
+            win.set_hostkey_prompt_open(true);
+        }
+    });
+}
+
+/// Apply the user's decision to the front prompt, then show the next one (or
+/// close the dialog if the queue is now empty).
+fn resolve_front_hostkey(win: &AppWindow, accept: bool) {
+    let has_next = HOSTKEY_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if let Some(p) = q.pop_front() {
+            HOSTKEY_DECIDED.with(|d| {
+                d.borrow_mut().insert(format!("{}:{}", p.host, p.port), accept);
+            });
+            for r in &p.responders {
+                r.respond(accept);
+            }
+        }
+        !q.is_empty()
+    });
+    if has_next {
+        show_front_hostkey(win);
+    } else {
+        win.set_hostkey_prompt_open(false);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Connect-time credential prompt (#110)
+// ---------------------------------------------------------------------------
+
+/// One queued credential prompt. Connections to the same session (shell + its
+/// SFTP channel) collapse into a single dialog whose answer fans out to each
+/// waiting responder.
+struct PendingCred {
+    session_id: String,
+    host: String,
+    user: String,
+    need_user: bool,
+    need_password: bool,
+    responders: Vec<crate::ssh::CredentialResponder>,
+}
+
+thread_local! {
+    static CRED_QUEUE: RefCell<VecDeque<PendingCred>> = RefCell::new(VecDeque::new());
+    /// session id → the answer given this run (`None` = cancelled), so a second
+    /// connection for the same session is answered without re-prompting.
+    static CRED_DECIDED: RefCell<HashMap<String, Option<crate::ssh::CredentialReply>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Queue a credential prompt: answer immediately if already decided this run,
+/// merge into an existing pending entry for the same session, otherwise enqueue
+/// (and show it now if nothing else is up).
+fn enqueue_cred_prompt(
+    win: &AppWindow,
+    session_id: String,
+    host: String,
+    user: String,
+    need_user: bool,
+    need_password: bool,
+    responder: crate::ssh::CredentialResponder,
+) {
+    if let Some(reply) = CRED_DECIDED.with(|d| d.borrow().get(&session_id).cloned()) {
+        responder.respond(reply);
+        return;
+    }
+    let show_now = CRED_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if let Some(p) = q.iter_mut().find(|p| p.session_id == session_id) {
+            p.responders.push(responder);
+            return false;
+        }
+        let was_empty = q.is_empty();
+        q.push_back(PendingCred {
+            session_id,
+            host,
+            user,
+            need_user,
+            need_password,
+            responders: vec![responder],
+        });
+        was_empty
+    });
+    if show_now {
+        show_front_cred(win);
+    }
+}
+
+/// Populate the credential dialog from the front prompt and open it.
+fn show_front_cred(win: &AppWindow) {
+    CRED_QUEUE.with(|q| {
+        if let Some(p) = q.borrow().front() {
+            win.set_cred_host(p.host.clone().into());
+            win.set_cred_need_user(p.need_user);
+            win.set_cred_need_password(p.need_password);
+            win.set_cred_user(p.user.clone().into());
+            win.set_cred_password("".into());
+            win.set_cred_remember(false);
+            win.set_cred_prompt_open(true);
+        }
+    });
+}
+
+/// Apply the user's answer to the front credential prompt (or cancel), persist
+/// it when "remember" is checked, then show the next prompt or close.
+fn resolve_front_cred(win: &AppWindow, accept: bool) {
+    let reply: Option<crate::ssh::CredentialReply> = if accept {
+        Some((
+            win.get_cred_user().to_string(),
+            win.get_cred_password().to_string(),
+            win.get_cred_remember(),
+        ))
+    } else {
+        None
+    };
+    let has_next = CRED_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        if let Some(p) = q.pop_front() {
+            CRED_DECIDED.with(|d| {
+                d.borrow_mut().insert(p.session_id.clone(), reply.clone());
+            });
+            if let Some((ref u, ref pw, true)) = reply {
+                persist_credentials(&p.session_id, u, pw, p.need_user, p.need_password);
+            }
+            for r in &p.responders {
+                r.respond(reply.clone());
+            }
+        }
+        !q.is_empty()
+    });
+    // Don't leave the typed password lingering in the UI property.
+    win.set_cred_password("".into());
+    if has_next {
+        show_front_cred(win);
+    } else {
+        win.set_cred_prompt_open(false);
+    }
+}
+
+/// Persist newly-entered credentials onto the saved session (#110, "remember").
+fn persist_credentials(
+    session_id: &str,
+    user: &str,
+    password: &str,
+    set_user: bool,
+    set_password: bool,
+) {
+    HISTORY_STORE.with(|s| {
+        if let Some(store) = s.borrow().as_ref() {
+            let mut st = store.borrow_mut();
+            if let Some(mut sess) = st.get(session_id).cloned() {
+                if set_user && !user.trim().is_empty() {
+                    sess.user = user.trim().to_string();
+                }
+                if set_password {
+                    sess.password = crate::config::Secret::new(password.to_string());
+                }
+                st.upsert(sess);
+                let _ = st.save();
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2314,27 +3140,80 @@ fn wire_sftp_callbacks(
         window.on_sftp_download(move |tab_id: SharedString, remote_path: SharedString| {
             let tab_id = tab_id.to_string();
             let remote_path = remote_path.to_string();
-            let preset = weak
+            // If the user has checked 2+ entries, ANY download (right-click,
+            // row button or the toolbar) packs the whole checked set into one
+            // archive (#100) — this matches "download these together". A single
+            // checked item (or none) downloads the clicked file as-is.
+            let (arc_dir, arc_names) = weak
                 .upgrade()
-                .map(|w| w.get_download_dir().to_string())
+                .and_then(|w| {
+                    let terminals = w.get_terminals();
+                    let tm = terminals
+                        .as_any()
+                        .downcast_ref::<VecModel<TerminalState>>()?;
+                    let paths = collect_sftp_selected(tm, &tab_id);
+                    if paths.len() >= 2 {
+                        let dir = active_sftp_path(&w, &tab_id);
+                        let names: Vec<String> = paths
+                            .iter()
+                            .map(|p| {
+                                p.trim_end_matches('/')
+                                    .rsplit(['/', '\\'])
+                                    .next()
+                                    .unwrap_or(p)
+                                    .to_string()
+                            })
+                            .collect();
+                        clear_sftp_selection(tm, &tab_id);
+                        Some((dir, names))
+                    } else {
+                        None
+                    }
+                })
+                .map(|(d, n)| (Some(d), n))
+                .unwrap_or((None, Vec::new()));
+            // "Always ask" (#87) forces the folder picker, ignoring the preset.
+            let (preset, always_ask) = weak
+                .upgrade()
+                .map(|w| {
+                    (
+                        w.get_download_dir().to_string(),
+                        w.get_download_always_ask(),
+                    )
+                })
                 .unwrap_or_default();
-            if !preset.is_empty() {
+            if !always_ask && !preset.is_empty() {
                 if let Ok(handles) = sftp_handles.lock() {
                     if let Some(h) = handles.get(&tab_id) {
-                        h.download(remote_path, preset);
+                        if let Some(ref dir) = arc_dir {
+                            h.download_archive(dir.clone(), arc_names.clone(), preset);
+                        } else {
+                            h.download(remote_path, preset);
+                        }
+                        // Pop the transfers panel so progress is visible (user
+                        // request: any download opens the download popup).
+                        if let Some(w) = weak.upgrade() {
+                            w.set_download_open(true);
+                        }
                     }
                 }
                 return;
             }
             let sftp_handles = sftp_handles.clone();
+            let weak = weak.clone();
             std::thread::spawn(move || {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     let local_dir = dir.to_string_lossy().to_string();
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
-                            h.download(remote_path, local_dir);
+                            if let Some(ref rdir) = arc_dir {
+                                h.download_archive(rdir.clone(), arc_names.clone(), local_dir);
+                            } else {
+                                h.download(remote_path, local_dir);
+                            }
                         }
                     }
+                    let _ = weak.upgrade_in_event_loop(|w| w.set_download_open(true));
                 }
             });
         });
@@ -2343,11 +3222,33 @@ fn wire_sftp_callbacks(
     // Upload a local file into the current remote directory.
     {
         let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
         window.on_sftp_upload_clicked(
             move |tab_id: SharedString, remote_dir: SharedString, folder: bool| {
                 let tab_id = tab_id.to_string();
                 let remote_dir = remote_dir.to_string();
                 let sftp_handles = sftp_handles.clone();
+                // Session-sync upload (#sync): when both the sync toggle and the
+                // "sync upload" setting are on, mirror the upload to every other
+                // online session — each into *that session's own* current SFTP
+                // directory (paths differ between sessions, e.g. /home/jeff vs
+                // /home/root, so the active session's path can't be reused).
+                // Gather targets on the UI thread (Slint models aren't Send).
+                let sync_targets: Vec<(String, String)> = weak
+                    .upgrade()
+                    .filter(|w| w.get_sync_input() && w.get_sync_upload_enabled())
+                    .map(|w| {
+                        let paths = terminal_sftp_paths(&w);
+                        let handles = sftp_handles.lock().ok();
+                        handles
+                            .iter()
+                            .flat_map(|h| h.keys())
+                            .filter(|id| *id != &tab_id)
+                            .filter_map(|id| paths.get(id).map(|dir| (id.clone(), dir.clone())))
+                            .filter(|(_, dir)| !dir.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 std::thread::spawn(move || {
                     // The remote SFTP upload handles a file or a whole directory;
                     // only the local picker differs (#85). Folder uploads one dir;
@@ -2372,8 +3273,17 @@ fn wire_sftp_callbacks(
                     }
                     if let Ok(handles) = sftp_handles.lock() {
                         if let Some(h) = handles.get(&tab_id) {
-                            for local in locals {
-                                h.upload(local, remote_dir.clone());
+                            for local in &locals {
+                                h.upload(local.clone(), remote_dir.clone());
+                            }
+                        }
+                        // Mirror to the other online sessions, each into its own
+                        // current SFTP directory.
+                        for (id, dir) in &sync_targets {
+                            if let Some(h) = handles.get(id) {
+                                for local in &locals {
+                                    h.upload(local.clone(), dir.clone());
+                                }
                             }
                         }
                     }
@@ -2426,6 +3336,130 @@ fn wire_sftp_callbacks(
                     h.delete(path.to_string());
                 }
             }
+        });
+    }
+
+    // SFTP multi-select: toggle a row's checkbox + recount (#100).
+    {
+        let weak = window.as_weak();
+        window.on_sftp_toggle_select(move |tab_id: SharedString, idx: i32| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            for ti in 0..tm.row_count() {
+                let Some(row) = tm.row_data(ti) else { continue };
+                if row.id.as_str() != tab_id.as_str() {
+                    continue;
+                }
+                if let Some(em) = row.sftp_entries.as_any().downcast_ref::<VecModel<SftpEntry>>() {
+                    let i = idx as usize;
+                    if let Some(mut e) = em.row_data(i) {
+                        e.selected = !e.selected;
+                        em.set_row_data(i, e);
+                    }
+                    let mut n = 0;
+                    for ei in 0..em.row_count() {
+                        if em.row_data(ei).map(|x| x.selected).unwrap_or(false) {
+                            n += 1;
+                        }
+                    }
+                    let mut r = row.clone();
+                    r.sftp_selected_count = n;
+                    tm.set_row_data(ti, r);
+                }
+                break;
+            }
+        });
+    }
+    // SFTP multi-select: download all checked entries into one folder (#100).
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_download_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = collect_sftp_selected(tm, tab_id.as_str());
+            if paths.is_empty() {
+                return;
+            }
+            // Single selection downloads as a plain file (no compression, #100.3);
+            // multiple selections are tar-packed into one archive on the remote
+            // (#100.2) — this also avoids the concurrent-transfer races (#100.1).
+            let single = paths.len() == 1;
+            let remote_dir = active_sftp_path(&w, tab_id.as_str());
+            let names: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    p.trim_end_matches('/')
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(p)
+                        .to_string()
+                })
+                .collect();
+            let preset = w.get_download_dir().to_string();
+            let always_ask = w.get_download_always_ask();
+            if !always_ask && !preset.is_empty() {
+                if let Ok(handles) = sftp_handles.lock() {
+                    if let Some(h) = handles.get(tab_id.as_str()) {
+                        if single {
+                            h.download(paths[0].clone(), preset.clone());
+                        } else {
+                            h.download_archive(remote_dir.clone(), names.clone(), preset.clone());
+                        }
+                    }
+                }
+                w.set_download_open(true);
+            } else {
+                let sftp_handles = sftp_handles.clone();
+                let weak2 = weak.clone();
+                let tab = tab_id.to_string();
+                std::thread::spawn(move || {
+                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                        let dir = dir.to_string_lossy().to_string();
+                        if let Ok(handles) = sftp_handles.lock() {
+                            if let Some(h) = handles.get(&tab) {
+                                if single {
+                                    h.download(paths[0].clone(), dir.clone());
+                                } else {
+                                    h.download_archive(remote_dir.clone(), names.clone(), dir.clone());
+                                }
+                            }
+                        }
+                        let _ = weak2.upgrade_in_event_loop(|w| w.set_download_open(true));
+                    }
+                });
+            }
+            clear_sftp_selection(tm, tab_id.as_str());
+        });
+    }
+    // SFTP multi-select: delete all checked entries (confirmed in the UI) (#100).
+    {
+        let sftp_handles = sftp_handles.clone();
+        let weak = window.as_weak();
+        window.on_sftp_delete_selected(move |tab_id: SharedString| {
+            let Some(w) = weak.upgrade() else { return };
+            let terminals = w.get_terminals();
+            let Some(tm) = terminals.as_any().downcast_ref::<VecModel<TerminalState>>() else {
+                return;
+            };
+            let paths = collect_sftp_selected(tm, tab_id.as_str());
+            if paths.is_empty() {
+                return;
+            }
+            if let Ok(handles) = sftp_handles.lock() {
+                if let Some(h) = handles.get(tab_id.as_str()) {
+                    for p in &paths {
+                        h.delete(p.clone());
+                    }
+                }
+            }
+            clear_sftp_selection(tm, tab_id.as_str());
         });
     }
 
@@ -2637,11 +3671,157 @@ fn wire_key_input(
     store: Rc<RefCell<ConfigStore>>,
     ctx: ConnectCtx,
 ) {
+    // --- Command bar (#55): run command + quick-command management ---------
+    {
+        let handles_rc = handles.clone();
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_run_command(move |tab_id: SharedString, cmd: SharedString, to_all: bool| {
+            let line = cmd.trim_end().to_string();
+            if line.is_empty() {
+                return;
+            }
+            let mut bytes = line.clone().into_bytes();
+            bytes.push(b'\n');
+            {
+                let h = handles_rc.borrow();
+                if to_all {
+                    for handle in h.values() {
+                        handle.send_raw(bytes.clone());
+                    }
+                } else if let Some(handle) = h.get(tab_id.as_str()) {
+                    handle.send_raw(bytes);
+                }
+            }
+            {
+                let mut s = store_rc.borrow_mut();
+                s.push_command_history(line);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_command_history(history_model(&store_rc.borrow()));
+            }
+        });
+    }
+    // Copy a history command to the clipboard (#96).
+    {
+        window.on_copy_text(move |text: SharedString| {
+            let t = text.to_string();
+            std::thread::spawn(move || clipboard_set_text(t));
+        });
+    }
+    // Delete a history entry (#96). The model is in storage order now (#113),
+    // so the row index maps straight through.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_delete_history(move |i: i32| {
+            {
+                let mut s = store_rc.borrow_mut();
+                let idx = i as usize;
+                if idx < s.command_history().len() {
+                    s.remove_command_history(idx);
+                    let _ = s.save();
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_command_history(history_model(&store_rc.borrow()));
+            }
+        });
+    }
+    // History search (#101): filter the dropdown by a case-insensitive substring.
+    // The current query is shared so a delete from a filtered view re-filters.
+    let hist_query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let hist_query = hist_query.clone();
+        window.on_search_history(move |query: SharedString| {
+            *hist_query.borrow_mut() = query.to_string();
+            if let Some(w) = weak.upgrade() {
+                w.set_history_view(history_view_model(&store_rc.borrow(), &query));
+            }
+        });
+    }
+    // Delete a history entry by its command text (#101) — index-free so it works
+    // from the filtered dropdown view.
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        let hist_query = hist_query.clone();
+        window.on_delete_history_cmd(move |cmd: SharedString| {
+            {
+                let mut s = store_rc.borrow_mut();
+                if let Some(idx) = s.command_history().iter().position(|c| c == cmd.as_str()) {
+                    s.remove_command_history(idx);
+                    let _ = s.save();
+                }
+            }
+            if let Some(w) = weak.upgrade() {
+                let s = store_rc.borrow();
+                w.set_command_history(history_model(&s));
+                w.set_history_view(history_view_model(&s, &hist_query.borrow()));
+            }
+        });
+    }
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_add_quick_command(move |name: SharedString, command: SharedString| {
+            let name = name.trim().to_string();
+            let command = command.to_string();
+            if name.is_empty() || command.trim().is_empty() {
+                return;
+            }
+            {
+                let mut s = store_rc.borrow_mut();
+                let mut v = s.quick_commands().to_vec();
+                v.push(crate::config::QuickCommand { name, command });
+                s.set_quick_commands(v);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow()));
+            }
+        });
+    }
+    {
+        let store_rc = store.clone();
+        let weak = window.as_weak();
+        window.on_delete_quick_command(move |index: i32| {
+            {
+                let mut s = store_rc.borrow_mut();
+                let mut v = s.quick_commands().to_vec();
+                let i = index as usize;
+                if i < v.len() {
+                    v.remove(i);
+                }
+                s.set_quick_commands(v);
+                let _ = s.save();
+            }
+            if let Some(w) = weak.upgrade() {
+                w.set_quick_commands(quick_cmd_model(&store_rc.borrow()));
+            }
+        });
+    }
+
+    // Session sync / broadcast input: when on, a keystroke in any terminal is
+    // mirrored to every online session (Xshell-style; #78 pt.4). Read on the hot
+    // keystroke path, so use an AtomicBool rather than a window-property lookup.
+    let sync_input = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let flag = sync_input.clone();
+        window.on_set_sync_input(move |on| {
+            flag.store(on, std::sync::atomic::Ordering::Relaxed);
+        });
+    }
+
     // Forward each keystroke as raw bytes to the SSH PTY. The server's bash /
     // readline handles echo, history (↑↓), Tab completion, Ctrl+C, etc.
     {
         let handles = handles.clone();
         let bufs = bufs.clone();
+        let sync_input = sync_input.clone();
         // Shared timestamp: the last time the Shift key alone was pressed
         // (key="", shift=true).  Used by the time-based Backspace filter below.
         let last_shift_time: Arc<Mutex<Option<std::time::Instant>>> =
@@ -2904,7 +4084,13 @@ fn wire_key_input(
                 handles.borrow().contains_key(tab_id.as_str()),
             );
             if !bytes.is_empty() {
-                if let Some(handle) = handles.borrow().get(tab_id.as_str()) {
+                let h = handles.borrow();
+                if sync_input.load(std::sync::atomic::Ordering::Relaxed) {
+                    // Broadcast the same bytes to every online session (#78 pt.4).
+                    for handle in h.values() {
+                        handle.send_raw(bytes.clone());
+                    }
+                } else if let Some(handle) = h.get(tab_id.as_str()) {
                     handle.send_raw(bytes);
                 }
             }
@@ -3072,6 +4258,8 @@ fn wire_key_input(
                     row.cursor_row = 0;
                     row.cursor_col = 0;
                     row.rows_used = 0;
+                    row.scroll_max = 0;
+                    row.scroll_offset = 0;
                 });
             }
             if let Some(h) = handles_clear.borrow().get(&tid) {
@@ -3119,6 +4307,24 @@ fn wire_key_input(
                 let max_off = buf.history.len() as i64;
                 let cur = buf.view_offset as i64;
                 buf.view_offset = (cur + delta as i64).clamp(0, max_off) as usize;
+            }
+            if let Some(win) = weak.upgrade() {
+                rebuild_tab_display(&win, &bufs_scroll, &tid);
+            }
+        });
+    }
+
+    // Scrollbar drag → jump to an absolute scrollback offset (#103).
+    {
+        let bufs_scroll = bufs.clone();
+        let weak = window.as_weak();
+        window.on_terminal_scroll_to(move |tab_id: SharedString, offset: i32| {
+            let tid = tab_id.to_string();
+            {
+                let mut map = bufs_scroll.lock().unwrap();
+                let Some(buf) = map.get_mut(&tid) else { return };
+                let max_off = buf.history.len() as i64;
+                buf.view_offset = (offset as i64).clamp(0, max_off) as usize;
             }
             if let Some(win) = weak.upgrade() {
                 rebuild_tab_display(&win, &bufs_scroll, &tid);
@@ -3348,6 +4554,89 @@ fn clipboard_set_text(text: String) {
 
 /// Enumerate installed monospace font families for the Interface font picker.
 /// Terminals want fixed-width fonts, so non-monospace families are filtered out.
+/// Choose a UI font family that fontdb can actually resolve, falling back to the
+/// embedded "Meatshell Mono" when the system font database is empty/unreadable.
+///
+/// macOS 26 (Tahoe) shipped a system where fontdb couldn't register the named
+/// CJK font ("PingFang SC"), so hard-coding that name made the whole UI render
+/// blank (#129). This probes the loaded faces and picks the first CJK-capable
+/// family that exists; if none do, it returns the embedded font so the window is
+/// still visible (Latin text shows; CJK may tofu — far better than a blank UI).
+///
+/// Emits a one-line WARN summary (faces loaded + chosen font) so the choice lands
+/// in `error.log` for diagnostics without needing RUST_LOG.
+fn resolve_ui_font_family() -> slint::SharedString {
+    use fontdb::{Database, Family, Query, Stretch, Style, Weight};
+
+    // Diagnostic / escape hatch (#129): force a specific UI font without a rebuild.
+    // e.g. MEATSHELL_UI_FONT="Meatshell Mono" to test whether the embedded font
+    // renders when system fonts don't. Empty value is ignored.
+    if let Some(f) = std::env::var_os("MEATSHELL_UI_FONT") {
+        let f = f.to_string_lossy().into_owned();
+        if !f.trim().is_empty() {
+            tracing::warn!(font = %f, "ui-font: overridden via MEATSHELL_UI_FONT");
+            return f.into();
+        }
+    }
+
+    let mut db = Database::new();
+    db.load_system_fonts();
+    let face_count = db.faces().count();
+
+    // CJK-capable system families, most-preferred first, per platform. The UI
+    // default font must cover CJK because TextInput doesn't glyph-fallback (#54).
+    //
+    // macOS note (#129): the modern system CJK fonts (PingFang SC, Hiragino) fail
+    // to rasterize under femtovg on some macOS 26 machines — fontdb finds them but
+    // every glyph comes out blank. The older Heiti/Songti faces render fine and
+    // ship on every macOS, so we prefer them and keep PingFang only as a late
+    // fallback. (Verified on an M2/macOS 26: Heiti SC/STHeiti/Songti SC render,
+    // PingFang/Hiragino don't.) Power users can still force one via
+    // MEATSHELL_UI_FONT. Heiti SC is a clean sans-serif (better for UI than the
+    // serif Songti), so it leads.
+    #[cfg(target_os = "macos")]
+    let candidates: &[&str] = &[
+        "Heiti SC", "STHeiti", "Songti SC", "PingFang SC", "Hiragino Sans GB",
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &["Microsoft YaHei UI", "Microsoft YaHei", "SimHei", "SimSun"];
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let candidates: &[&str] = &[
+        "Noto Sans CJK SC", "Noto Sans CJK", "Source Han Sans SC",
+        "WenQuanYi Micro Hei", "Droid Sans Fallback",
+    ];
+
+    for name in candidates {
+        let q = Query {
+            families: &[Family::Name(name)],
+            weight: Weight::NORMAL,
+            stretch: Stretch::Normal,
+            style: Style::Normal,
+        };
+        if db.query(&q).is_some() {
+            tracing::warn!(faces = face_count, font = name, "ui-font: using system CJK font");
+            return (*name).into();
+        }
+    }
+
+    // No preferred family resolved. List what *is* available (if anything) so the
+    // log shows whether enumeration is empty or just missing our candidates (#129).
+    if face_count > 0 {
+        let mut fams: Vec<String> = db
+            .faces()
+            .filter_map(|f| f.families.first().map(|(n, _)| n.clone()))
+            .collect();
+        fams.sort();
+        fams.dedup();
+        let sample: Vec<String> = fams.into_iter().take(40).collect();
+        tracing::warn!(faces = face_count, available = ?sample,
+            "ui-font: no preferred CJK font resolved; listing available families");
+    }
+    tracing::warn!(faces = face_count,
+        "ui-font: falling back to embedded 'Meatshell Mono' (system fonts unusable, #129)");
+    "Meatshell Mono".into()
+}
+
 fn system_monospace_fonts() -> Vec<slint::SharedString> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
@@ -3358,7 +4647,13 @@ fn system_monospace_fonts() -> Vec<slint::SharedString> {
         .collect();
     names.sort();
     names.dedup();
-    names.into_iter().map(slint::SharedString::from).collect()
+    // Surface the built-in glyph-complete font first so it's selectable and the
+    // default selection is shown — it isn't a system face so fontdb won't list it
+    // (#114).
+    names.retain(|n| n != "Meatshell Mono");
+    let mut out = vec![slint::SharedString::from("Meatshell Mono")];
+    out.extend(names.into_iter().map(slint::SharedString::from));
+    out
 }
 
 /// Split a stored proxy URL into `(type, host:port)` for the session dialog.
@@ -3597,6 +4892,10 @@ struct BuiltScreen {
     cursor_col: i32,
     rows_used: i32,
     is_alt: bool,
+    /// Scrollback depth (max view_offset = history length) and the current
+    /// offset (0 = live bottom), for the terminal scrollbar (#103).
+    scroll_max: i32,
+    scroll_offset: i32,
 }
 
 /// One coloured run within a line (its grid row is assigned at render time).
@@ -3627,7 +4926,7 @@ fn cell_attrs(
     screen: &vt100::Screen,
     r: u16,
     c: u16,
-) -> (String, vt100::Color, vt100::Color, bool) {
+) -> (String, vt100::Color, vt100::Color, bool, bool) {
     match screen.cell(r, c) {
         Some(cell) => {
             let (mut fg, mut bg) = (cell.fgcolor(), cell.bgcolor());
@@ -3647,12 +4946,13 @@ fn cell_attrs(
             } else {
                 s
             };
-            (s, fg, bg, cell.bold())
+            (s, fg, bg, cell.bold(), cell.is_wide())
         }
         None => (
             " ".to_string(),
             vt100::Color::Default,
             vt100::Color::Default,
+            false,
             false,
         ),
     }
@@ -3663,17 +4963,36 @@ fn build_row(screen: &vt100::Screen, r: u16, cols: u16) -> Line {
     let mut runs: Vec<HistSpan> = Vec::new();
     let mut c = 0u16;
     while c < cols {
-        let (s, fg, bg, bold) = cell_attrs(screen, r, c);
-        // Group consecutive cells that share fg + bg + bold into one run.  Unlike
-        // before we keep blank cells *inside* a run (so a coloured bar made of
-        // spaces still gets a background fill) and break only on attribute change.
+        let (s, fg, bg, bold, wide) = cell_attrs(screen, r, c);
+        // A wide (CJK) glyph gets its OWN span occupying exactly its two grid
+        // cells, so the UI can box + centre + clip it on the monospace grid.
+        // Otherwise a run of CJK rendered with a proportional CJK font drifts off
+        // the grid — the trailing `/`, `$` or cursor overlaps or gaps the glyph
+        // (CJK advance != 2×the Latin cell width).
+        if wide {
+            plain.push_str(&s);
+            runs.push(HistSpan {
+                text: s,
+                fg,
+                bg,
+                bold,
+                col: c as i32,
+                cells: 2,
+            });
+            c += 2; // skip the wide-continuation cell
+            continue;
+        }
+        // Group consecutive *narrow* cells that share fg + bg + bold into one run.
+        // We keep blank cells *inside* a run (so a coloured bar made of spaces
+        // still gets a background fill) and break on attribute change or a wide
+        // cell (which starts its own span above).
         let start_col = c;
         let mut text = s.clone();
         plain.push_str(&s);
         c += 1;
         while c < cols {
-            let (cs, cfg, cbg, cbold) = cell_attrs(screen, r, c);
-            if cfg != fg || cbg != bg || cbold != bold {
+            let (cs, cfg, cbg, cbold, cwide) = cell_attrs(screen, r, c);
+            if cwide || cfg != fg || cbg != bg || cbold != bold {
                 break;
             }
             plain.push_str(&cs);
@@ -3739,14 +5058,17 @@ impl TermBuffer {
     }
 
     /// Absolute combined-row index of the top visible row for the current view.
-    fn view_top_abs(&self, live_used: usize) -> usize {
+    fn view_top_abs(&self, _live_used: usize) -> usize {
         let rows = self.parser.screen().size().0 as usize;
         let hist_len = self.history.len();
         if self.view_offset == 0 {
             // Live view: visible row 0 is live screen row 0 = combined[hist_len].
             hist_len
         } else {
-            let combined_len = hist_len + live_used;
+            // Include the screen's full row count (trailing blanks too) so this
+            // mapping matches render()'s scroll window — keeping the live and
+            // scrolled views continuous after a shrink/grow (#119-followup).
+            let combined_len = hist_len + rows;
             combined_len.saturating_sub(rows + self.view_offset)
         }
     }
@@ -3995,6 +5317,7 @@ impl TermBuffer {
                 }
                 for hs in runs {
                     spans.push(TermSpan {
+                        cjk: contains_cjk(&hs.text),
                         text: hs.text.into(),
                         fg: vt_color_to_slint(hs.fg, hs.bold, self.is_dark),
                         bg: vt_bg_to_slint(hs.bg, self.is_dark),
@@ -4014,6 +5337,8 @@ impl TermBuffer {
                 cursor_col: cur_col as i32,
                 rows_used,
                 is_alt,
+                scroll_max: if is_alt { 0 } else { self.history.len() as i32 },
+                scroll_offset: 0,
             };
         }
 
@@ -4022,13 +5347,14 @@ impl TermBuffer {
             let s = self.parser.screen();
             (0..rows).map(|r| build_row(s, r, cols)).collect()
         };
-        let live_used = live
-            .iter()
-            .rposition(|(_, r)| !r.is_empty())
-            .map(|i| i + 1)
-            .unwrap_or(0);
         let hist_len = self.history.len();
-        let combined_len = hist_len + live_used;
+        // Include the screen's trailing blank rows in the scroll range so this
+        // scrolled view stays continuous with the live view (view_offset 0).
+        // Trimming to only the used rows made the two views misalign after a
+        // shrink-then-grow (dragging the SFTP panel over the terminal and back),
+        // so scrolling back jumped at the bottom instead of moving line-by-line
+        // (#119-followup).
+        let combined_len = hist_len + live.len();
         let win = rows as usize;
         let start = combined_len.saturating_sub(win + self.view_offset);
         let end = (start + win).min(combined_len);
@@ -4050,6 +5376,7 @@ impl TermBuffer {
                     row: d as i32,
                     col: hs.col,
                     cells: hs.cells,
+                    cjk: contains_cjk(&hs.text),
                 });
             }
             displayed.push(line.0.trim_end().to_string());
@@ -4064,8 +5391,31 @@ impl TermBuffer {
             cursor_col: 0,
             rows_used: win as i32,
             is_alt: false,
+            scroll_max: self.history.len() as i32,
+            scroll_offset: self.view_offset as i32,
         }
     }
+}
+
+/// True if a terminal span contains any CJK character — ideograph, kana, or
+/// (crucially) CJK punctuation like 、。，. The mono terminal font has no CJK
+/// glyphs and Slint's per-script fallback tofu's *isolated* CJK punctuation
+/// (it renders fine only when adjacent to a Han char), so these spans are drawn
+/// with the CJK-capable UI font instead (#54). Box-drawing / powerline glyphs
+/// are deliberately excluded so they keep the aligned monospace font.
+fn contains_cjk(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c as u32,
+            0x2E80..=0x2EFF       // CJK radicals
+            | 0x3000..=0x303F     // CJK symbols & punctuation (、。「」…)
+            | 0x3040..=0x30FF     // hiragana + katakana
+            | 0x3100..=0x312F     // bopomofo
+            | 0x3400..=0x4DBF     // CJK ext A
+            | 0x4E00..=0x9FFF     // CJK unified ideographs
+            | 0xF900..=0xFAFF     // CJK compatibility ideographs
+            | 0xFF00..=0xFFEF     // fullwidth / halfwidth forms (，！？：；)
+            | 0x20000..=0x2FA1F)  // CJK ext B–F + compat supplement
+    })
 }
 
 /// 16-colour ANSI palette for **dark** terminals (VS Code "Dark+" values).

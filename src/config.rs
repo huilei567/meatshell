@@ -194,6 +194,31 @@ pub struct Session {
     /// "none" | "hardware" | "software".
     #[serde(default = "default_flow")]
     pub flow_control: String,
+
+    // --- SSH port forwarding / tunnels (#56) --------------------------------
+    /// Tunnels established automatically when this SSH session connects.
+    #[serde(default)]
+    pub forwards: Vec<PortForward>,
+}
+
+/// One SSH tunnel (#56). `kind` is "local" (-L), "remote" (-R) or
+/// "dynamic" (-D / SOCKS5). For local/remote, `host:host_port` is the target;
+/// for dynamic it is ignored (the SOCKS client picks the destination).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PortForward {
+    pub kind: String,
+    /// Optional label to tell rules apart (#100). Empty = unnamed.
+    #[serde(default)]
+    pub name: String,
+    /// Listener bind address (local side for L/D, remote side for R).
+    /// Empty → 127.0.0.1.
+    #[serde(default)]
+    pub bind_addr: String,
+    pub bind_port: u16,
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub host_port: u16,
 }
 
 impl Session {
@@ -217,8 +242,17 @@ impl Session {
             stop_bits: default_stop_bits(),
             parity: default_parity(),
             flow_control: default_flow(),
+            forwards: Vec::new(),
         }
     }
+}
+
+/// A saved quick command (#55): a named snippet the user clicks to send to the
+/// active terminal.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct QuickCommand {
+    pub name: String,
+    pub command: String,
 }
 
 /// On-disk layout. Keep additive to ease forward-compat.
@@ -238,12 +272,15 @@ pub struct ConfigFile {
     /// UI layout theme: "finalshell" (default) | "mobaxterm".
     #[serde(default)]
     pub ui_theme: String,
-    /// Terminal font family. Empty = the built-in default (Cascadia Mono).
+    /// Terminal font family. Empty = the built-in default ("Meatshell Mono").
     #[serde(default)]
     pub font_family: String,
     /// Terminal font size in px. 0 = the built-in default.
     #[serde(default)]
     pub font_size: u32,
+    /// Global UI scale in percent (#100). 0 = default (100%).
+    #[serde(default)]
+    pub ui_scale: u32,
     /// Explicit session groups/folders (#41), including empty ones so a folder
     /// can exist before any session is moved into it. "default" is implicit and
     /// not stored here.
@@ -254,6 +291,26 @@ pub struct ConfigFile {
     /// terminal's cd (OSC 7) unless the user opts out in Interface settings.
     #[serde(default)]
     pub sftp_no_follow_cd: bool,
+    /// Always prompt for the save location on each download instead of using the
+    /// preset download dir. Defaults to false (#87).
+    #[serde(default)]
+    pub download_always_ask: bool,
+    /// Saved quick commands (#55).
+    #[serde(default)]
+    pub quick_commands: Vec<QuickCommand>,
+    /// Recent commands sent from the command box, oldest first, capped (#55).
+    #[serde(default)]
+    pub command_history: Vec<String>,
+    /// Collapse the left resource sidebar on startup (#78).
+    #[serde(default)]
+    pub collapse_sidebar_default: bool,
+    /// Collapse the bottom SFTP panel on startup (#78).
+    #[serde(default)]
+    pub collapse_sftp_default: bool,
+    /// When session-sync is on, also mirror SFTP uploads to the other online
+    /// sessions (same path, falling back to each panel's current dir).
+    #[serde(default)]
+    pub sync_upload: bool,
 }
 
 /// Portable export file (issue #46): sessions with everything in plaintext
@@ -276,6 +333,20 @@ pub struct ConfigStore {
     /// ChaCha20-Poly1305 key loaded from (or freshly generated into)
     /// `secret.key` in the same directory as `sessions.json`.
     key: [u8; 32],
+}
+
+/// Remove duplicate entries in place, keeping the *last* (most recent)
+/// occurrence of each and preserving relative order (#113). The list is capped
+/// at 200, so the quadratic scan is trivial.
+fn dedup_keep_last(items: &mut Vec<String>) {
+    let mut i = 0;
+    while i < items.len() {
+        if items[i + 1..].contains(&items[i]) {
+            items.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 impl ConfigStore {
@@ -389,6 +460,9 @@ impl ConfigStore {
                             session.password = Secret::new(plain);
                         }
                     }
+                    // Clean up any duplicate history accumulated before #113,
+                    // keeping the last (most recent) occurrence of each command.
+                    dedup_keep_last(&mut cfg.command_history);
                     cfg
                 }
                 Err(err) => {
@@ -517,6 +591,19 @@ impl ConfigStore {
         self.cache.font_size = size.clamp(8, 32);
     }
 
+    /// Global UI scale in percent (#100). Defaults to 100.
+    pub fn ui_scale(&self) -> u32 {
+        if self.cache.ui_scale == 0 {
+            100
+        } else {
+            self.cache.ui_scale
+        }
+    }
+
+    pub fn set_ui_scale(&mut self, percent: u32) {
+        self.cache.ui_scale = percent.clamp(80, 200);
+    }
+
     /// Whether the SFTP panel follows the terminal's cd (default true).
     pub fn sftp_follow_cd(&self) -> bool {
         !self.cache.sftp_no_follow_cd
@@ -524,6 +611,82 @@ impl ConfigStore {
 
     pub fn set_sftp_follow_cd(&mut self, follow: bool) {
         self.cache.sftp_no_follow_cd = !follow;
+    }
+
+    /// Saved quick commands (#55).
+    pub fn quick_commands(&self) -> &[QuickCommand] {
+        &self.cache.quick_commands
+    }
+
+    pub fn set_quick_commands(&mut self, cmds: Vec<QuickCommand>) {
+        self.cache.quick_commands = cmds;
+    }
+
+    /// Recent command-box history, oldest first (#55).
+    pub fn command_history(&self) -> &[String] {
+        &self.cache.command_history
+    }
+
+    /// Append a command to the history: skips blanks, de-duplicates globally so
+    /// each command appears once, and re-appends at the end so the most-recently
+    /// used command is always last. Capped so it can't grow without bound (#113).
+    pub fn push_command_history(&mut self, cmd: String) {
+        if cmd.trim().is_empty() {
+            return;
+        }
+        // Drop any earlier occurrence, then push → no duplicates and "last used"
+        // moves to the end (bash `HISTCONTROL=erasedups` semantics).
+        self.cache.command_history.retain(|c| c != &cmd);
+        const CAP: usize = 200;
+        self.cache.command_history.push(cmd);
+        let len = self.cache.command_history.len();
+        if len > CAP {
+            self.cache.command_history.drain(0..len - CAP);
+        }
+    }
+
+    /// Remove a single command-history entry by storage index (#96).
+    pub fn remove_command_history(&mut self, index: usize) {
+        if index < self.cache.command_history.len() {
+            self.cache.command_history.remove(index);
+        }
+    }
+
+    /// Collapse the resource sidebar on startup (default false) (#78).
+    pub fn collapse_sidebar_default(&self) -> bool {
+        self.cache.collapse_sidebar_default
+    }
+
+    pub fn set_collapse_sidebar_default(&mut self, v: bool) {
+        self.cache.collapse_sidebar_default = v;
+    }
+
+    /// Collapse the SFTP panel on startup (default false) (#78).
+    pub fn collapse_sftp_default(&self) -> bool {
+        self.cache.collapse_sftp_default
+    }
+
+    pub fn set_collapse_sftp_default(&mut self, v: bool) {
+        self.cache.collapse_sftp_default = v;
+    }
+
+    /// Mirror SFTP uploads to other sessions while session-sync is on (default
+    /// false). Only has effect when the session-sync toggle is on.
+    pub fn sync_upload(&self) -> bool {
+        self.cache.sync_upload
+    }
+
+    pub fn set_sync_upload(&mut self, v: bool) {
+        self.cache.sync_upload = v;
+    }
+
+    /// Whether each download prompts for a save location (default false) (#87).
+    pub fn download_always_ask(&self) -> bool {
+        self.cache.download_always_ask
+    }
+
+    pub fn set_download_always_ask(&mut self, ask: bool) {
+        self.cache.download_always_ask = ask;
     }
 
     // ── Session groups / folders (#41) ────────────────────────────────────
