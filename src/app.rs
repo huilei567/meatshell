@@ -403,6 +403,16 @@ pub fn run() -> Result<()> {
     let sessions_model: Rc<VecModel<SessionInfo>> = Rc::new(VecModel::default());
     window.set_sessions(ModelRc::from(sessions_model.clone()));
     sync_sessions_to_model(&store.borrow(), &sessions_model);
+    let moba_sessions_model: Rc<VecModel<SessionInfo>> = Rc::new(VecModel::default());
+    window.set_moba_sessions(ModelRc::from(moba_sessions_model.clone()));
+    sync_moba_sessions_to_model(&store.borrow(), &moba_sessions_model, "");
+    {
+        let store = store.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
+        window.on_filter_moba_sessions(move |query: SharedString| {
+            sync_moba_sessions_to_model(&store.borrow(), &moba_sessions_model, &query);
+        });
+    }
 
     let tabs_model: Rc<VecModel<TabInfo>> = Rc::new(VecModel::default());
     tabs_model.push(TabInfo {
@@ -428,6 +438,7 @@ pub fn run() -> Result<()> {
         &window,
         store.clone(),
         sessions_model.clone(),
+        moba_sessions_model.clone(),
         tabs_model.clone(),
         terminals_model.clone(),
         handles.clone(),
@@ -1147,6 +1158,52 @@ fn sync_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>) {
     model.set_vec(rows);
 }
 
+fn sync_moba_sessions_to_model(store: &ConfigStore, model: &VecModel<SessionInfo>, query: &str) {
+    let q = query.trim().to_lowercase();
+    let mut sessions: Vec<&Session> = store
+        .sessions()
+        .iter()
+        .filter(|s| {
+            if q.is_empty() {
+                true
+            } else {
+                s.name.to_lowercase().contains(&q)
+                    || s.host.to_lowercase().contains(&q)
+                    || s.user.to_lowercase().contains(&q)
+            }
+        })
+        .collect();
+    sessions.sort_by_key(|s| s.name.to_lowercase());
+    let rows: Vec<SessionInfo> = sessions
+        .into_iter()
+        .map(|s| SessionInfo {
+            id: s.id.clone().into(),
+            name: s.name.clone().into(),
+            host: s.host.clone().into(),
+            port: s.port as i32,
+            user: s.user.clone().into(),
+            auth: s.auth.as_str().into(),
+            last_used: s
+                .last_used
+                .clone()
+                .unwrap_or_else(|| "never".to_string())
+                .into(),
+            group: s.group.clone().into(),
+            group_header: "".into(),
+            collapsed: false,
+        })
+        .collect();
+    model.set_vec(rows);
+}
+
+fn refresh_moba_sessions_from_window(
+    win: &AppWindow,
+    store: &ConfigStore,
+    model: &VecModel<SessionInfo>,
+) {
+    sync_moba_sessions_to_model(store, model, &win.get_moba_search());
+}
+
 // ---------------------------------------------------------------------------
 // Session callbacks (welcome page + dialog)
 // ---------------------------------------------------------------------------
@@ -1155,6 +1212,7 @@ fn wire_session_callbacks(
     window: &AppWindow,
     store: Rc<RefCell<ConfigStore>>,
     sessions_model: Rc<VecModel<SessionInfo>>,
+    moba_sessions_model: Rc<VecModel<SessionInfo>>,
     tabs_model: Rc<VecModel<TabInfo>>,
     terminals_model: Rc<VecModel<TerminalState>>,
     handles: Rc<RefCell<HashMap<String, SessionHandle>>>,
@@ -1212,6 +1270,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_import_ssh_config(move || {
             let hosts = crate::ssh_config::parse_default();
             let mut added = 0usize;
@@ -1254,6 +1313,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 let hint = if added > 0 {
                     format!("{} {}", t("已导入", "imported"), added)
                 } else {
@@ -1292,6 +1352,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_import_sessions(move || {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("JSON", &["json"])
@@ -1302,6 +1363,11 @@ fn wire_session_callbacks(
                     let hint = match res {
                         Ok((added, skipped)) => {
                             sync_sessions_to_model(&store.borrow(), &sessions_model);
+                            refresh_moba_sessions_from_window(
+                                &w,
+                                &store.borrow(),
+                                &moba_sessions_model,
+                            );
                             format!(
                                 "{} {} / {} {}",
                                 t("已导入", "imported"),
@@ -1362,6 +1428,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_remove_session(move |id: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1372,6 +1439,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 // Touch a property so the list re-renders reliably.
                 let _ = w.get_sessions();
             }
@@ -1383,6 +1451,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_duplicate_session(move |id: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1399,6 +1468,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 let _ = w.get_sessions();
             }
         });
@@ -1409,6 +1479,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_move_session(move |id: SharedString, group: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1428,6 +1499,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 let _ = w.get_sessions();
             }
         });
@@ -1472,6 +1544,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_submit_group(move |orig: SharedString, name: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1486,6 +1559,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 let _ = w.get_sessions();
             }
         });
@@ -1495,6 +1569,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         window.on_delete_group(move |name: SharedString| {
             {
                 let mut s = store.borrow_mut();
@@ -1505,6 +1580,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 let _ = w.get_sessions();
             }
         });
@@ -1515,6 +1591,7 @@ fn wire_session_callbacks(
         let weak = window.as_weak();
         let store = store.clone();
         let sessions_model = sessions_model.clone();
+        let moba_sessions_model = moba_sessions_model.clone();
         let edit_forwards = edit_forwards.clone();
         window.on_session_dialog_submit(move |draft: SessionDraft| {
             let id = draft.id.to_string();
@@ -1589,6 +1666,7 @@ fn wire_session_callbacks(
             }
             sync_sessions_to_model(&store.borrow(), &sessions_model);
             if let Some(w) = weak.upgrade() {
+                refresh_moba_sessions_from_window(&w, &store.borrow(), &moba_sessions_model);
                 w.set_dialog_open(false);
             }
         });

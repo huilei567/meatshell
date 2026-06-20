@@ -257,6 +257,12 @@ export component TerminalView inherits Rectangle {
     changed history-open => {
         if (root.history-open) { root.search-history(""); }
     }
+    changed moba-mode => {
+        if (root.moba-mode) {
+            root.quick-open = false;
+            root.history-open = false;
+        }
+    }
     changed visible => {
         if (self.visible) {
             ime-input.focus();
@@ -787,7 +793,8 @@ export component TerminalView inherits Rectangle {
 
         // --- Command bar (#55): quick commands + input box + history ---------
         cmd-bar := Rectangle {
-            height: 34px;
+            visible: !root.moba-mode;
+            height: root.moba-mode ? 0px : 34px;
             background: Theme.bg-panel-alt;
             border-width: 0;
 
