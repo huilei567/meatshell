@@ -83,6 +83,7 @@ export component SftpPanel inherits Rectangle {
     in property <bool> moba-mode: false;   // compact MobaXterm-style current-directory list
     in property <bool> moba-follow-cd: true;
     in property <bool> lang-en: false;
+    in-out property <length> file-scroll-y: 0px;
     property <int> selected-row: -1;       // clicked/highlighted file-list row (#70)
     in property <int> selected-count;      // number of checked entries (#100)
     // Panel-level right-click context menu (#84). One menu for the whole list:
@@ -135,6 +136,7 @@ export component SftpPanel inherits Rectangle {
         path-input.text = root.current-path;
         root.selected-row = -1;
         root.menu-target = "";
+        root.file-scroll-y = 0px;
     }
 
     Timer {
@@ -523,6 +525,7 @@ export component SftpPanel inherits Rectangle {
                 ScrollView {
                     width: parent.width;
                     height: parent.height;
+                    viewport-y <=> root.file-scroll-y;
                     viewport-width: self.visible-width;
                     viewport-height: max(self.visible-height, moba-file-list.preferred-height);
 
@@ -784,6 +787,7 @@ export component SftpPanel inherits Rectangle {
                     ScrollView {
                         width: parent.width;
                         height: parent.height;
+                        viewport-y <=> root.file-scroll-y;
                         viewport-width: self.visible-width;
                         viewport-height: max(self.visible-height, file-list.preferred-height);
 

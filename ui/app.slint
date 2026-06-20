@@ -350,6 +350,8 @@ export component AppWindow inherits Window {
     in-out property <bool> sync-upload-enabled: false;
     callback set-sync-upload-enabled(bool);
     in-out property <length> sftp-panel-height: 220px; // shared; lets Rust locate the drop zone
+    in-out property <length> sftp-file-scroll-y: 0px;   // shared; lets Rust resolve drop row
+    in-out property <length> moba-sftp-width: 280px;    // shared; lets Rust locate Moba SFTP pane
     callback pick-download-dir();            // open a folder picker
     callback open-download-dir();            // reveal the folder in the OS
     callback clear-transfers();              // wipe the transfer history
@@ -1055,6 +1057,8 @@ export component AppWindow inherits Window {
                     find-matches: term.find-matches;
                     selection: term.selection;
                     sftp-panel-height <=> root.sftp-panel-height;
+                    sftp-file-scroll-y <=> root.sftp-file-scroll-y;
+                    moba-sftp-width <=> root.moba-sftp-width;
                     sftp-collapsed <=> root.sftp-collapsed;
                     sftp-saved-height <=> root.sftp-saved-height;
                     sftp-path: term.sftp-path;

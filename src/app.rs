@@ -1019,6 +1019,29 @@ fn active_sftp_path(win: &AppWindow, tab_id: &str) -> String {
     String::new()
 }
 
+fn sftp_drop_target_dir(win: &AppWindow, tab_id: &str, row_index: usize) -> Option<String> {
+    let model = win.get_terminals();
+    let terminals = model.as_any().downcast_ref::<VecModel<TerminalState>>()?;
+    for i in 0..terminals.row_count() {
+        let row = terminals.row_data(i)?;
+        if row.id.as_str() != tab_id {
+            continue;
+        }
+        let current = row.sftp_path.to_string();
+        if let Some(entry) = row.sftp_entries.row_data(row_index) {
+            if entry.is_dir && entry.name.as_str() != ".." {
+                return Some(entry.full_path.to_string());
+            }
+        }
+        return if current.is_empty() {
+            None
+        } else {
+            Some(current)
+        };
+    }
+    None
+}
+
 /// Current mouse cursor position in physical screen pixels (Windows).
 #[cfg(windows)]
 fn cursor_pos() -> Option<(i32, i32)> {
@@ -1060,22 +1083,27 @@ fn handle_file_drop(win: &AppWindow, sftp_handles: &SftpHandles, path: String) {
     let client_y = (cy - inner.y) as f32 / scale;
     let w_logical = size.width as f32 / scale;
     let h_logical = size.height as f32 / scale;
-    let h_sftp = win.get_sftp_panel_height();
+    let is_moba = win.get_ui_theme().as_str() == "mobaxterm";
+    let (zone_left, zone_right, zone_top, zone_bottom, row_h) = if is_moba {
+        let top =
+            (if win.get_custom_titlebar() { 38.0 } else { 0.0 }) + 52.0 + 30.0 + 28.0 + 31.0 + 23.0;
+        (0.0, win.get_moba_sftp_width(), top, h_logical - 28.0, 25.0)
+    } else {
+        let h_sftp = win.get_sftp_panel_height();
+        let top = h_logical - h_sftp + 30.0 + 21.0;
+        (220.0 + 30.0 + 160.0 + 1.0, w_logical, top, h_logical - 18.0, 24.0)
+    };
 
-    // File-list box (logical): right of the sidebar(220)+tree(160)+sep(1),
-    // below the SFTP toolbar(30)+header(20)+sep(1), above the status bar(18).
-    let zone_left = 381.0_f32;
-    let zone_top = h_logical - h_sftp + 51.0;
-    let zone_bottom = h_logical - 18.0;
-    if client_x < zone_left || client_x > w_logical || client_y < zone_top || client_y > zone_bottom
+    if client_x < zone_left || client_x > zone_right || client_y < zone_top || client_y > zone_bottom
     {
         return; // dropped outside the file list — ignore
     }
 
-    let dir = active_sftp_path(win, &active);
-    if dir.is_empty() {
+    let scroll_y = win.get_sftp_file_scroll_y();
+    let row_index = ((client_y - zone_top + scroll_y) / row_h).floor().max(0.0) as usize;
+    let Some(dir) = sftp_drop_target_dir(win, &active, row_index) else {
         return;
-    }
+    };
     // Session-sync (#sync): when both toggles are on, also mirror the drop to
     // every other online session — each into *its own* current SFTP dir. This
     // matches the upload button's behaviour (drag-and-drop is a separate path).

@@ -106,11 +106,12 @@ export component TerminalView inherits Rectangle {
     in-out property <bool> sftp-follow-cd: true;
 
     in-out property <length> sftp-panel-height: 220px;
+    in-out property <length> sftp-file-scroll-y: 0px;
     // Shared with the AppWindow (like sftp-panel-height) so a startup default can
     // collapse the panel and the state stays consistent across tabs (#78).
     in-out property <length> sftp-saved-height: 220px;   // height to restore on un-collapse
     in-out property <bool>   sftp-collapsed: false;       // SFTP panel minimised (toolbar only)
-    property <length> moba-sftp-width: 280px;
+    in-out property <length> moba-sftp-width: 280px;
     property <bool> moba-sftp-dragging: false;
     property <length> moba-drag-start-mouse-x: 0px;
     property <string> moba-resource-tip: "";
@@ -279,6 +280,7 @@ export component TerminalView inherits Rectangle {
             width: root.moba-sftp-width;
             moba-mode:     true;
             lang-en:       root.lang-en;
+            file-scroll-y <=> root.sftp-file-scroll-y;
             moba-follow-cd: root.sftp-follow-cd;
             collapsed:     false;
             current-path:  root.sftp-path;
@@ -1202,6 +1204,7 @@ export component TerminalView inherits Rectangle {
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
             lang-en:       root.lang-en;
+            file-scroll-y <=> root.sftp-file-scroll-y;
             selected-count: root.sftp-selected-count;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
