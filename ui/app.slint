@@ -704,7 +704,7 @@ export component AppWindow inherits Window {
                         x: 10px;
                         width: parent.width - 20px;
                         height: parent.height;
-                        text: "Quick connect...";
+                        text: root.lang-en ? "Quick connect..." : "快速连接...";
                         color: Theme.text-muted;
                         font-size: Theme.fs-sm;
                         vertical-alignment: center;
@@ -717,7 +717,7 @@ export component AppWindow inherits Window {
                         padding-left: 10px;
                         spacing: 8px;
                         Text { text: "\u{E2C7}"; font-family: "Material Icons"; color: #1976d2; font-size: Theme.fs-md; vertical-alignment: center; }
-                        Text { text: "User sessions"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; horizontal-stretch: 1; }
+                        Text { text: root.lang-en ? "User sessions" : "用户会话"; color: Theme.text-primary; font-size: Theme.fs-sm; vertical-alignment: center; horizontal-stretch: 1; }
                     }
                 }
                 ScrollView {
@@ -727,7 +727,7 @@ export component AppWindow inherits Window {
                         padding-top: 6px;
                         spacing: 1px;
                         if root.moba-sessions.length == 0 : Text {
-                            text: "No saved sessions";
+                            text: root.lang-en ? "No saved sessions" : "暂无保存的会话";
                             color: Theme.text-muted;
                             font-size: Theme.fs-sm;
                             horizontal-alignment: center;
@@ -917,7 +917,7 @@ export component AppWindow inherits Window {
                                     alignment: center;
                                     spacing: 8px;
                                     Text { text: "\u{E147}"; font-family: "Material Icons"; color: #34a853; font-size: Theme.fs-md; vertical-alignment: center; }
-                                    Text { text: "Start local terminal"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Start local terminal" : "启动本地终端"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
                                 }
                             }
                             Rectangle {
@@ -930,7 +930,7 @@ export component AppWindow inherits Window {
                                     alignment: center;
                                     spacing: 8px;
                                     Text { text: "\u{E5D5}"; font-family: "Material Icons"; color: #00acc1; font-size: Theme.fs-md; vertical-alignment: center; }
-                                    Text { text: "Recover previous sessions"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
+                                    Text { text: root.lang-en ? "Recover previous sessions" : "恢复上次会话"; color: Theme.text-primary; font-size: Theme.fs-md; vertical-alignment: center; }
                                 }
                             }
                         }
@@ -958,7 +958,7 @@ export component AppWindow inherits Window {
                                 x: 8px;
                                 width: parent.width - 16px;
                                 height: parent.height;
-                                text: "Find existing session or server name...";
+                                text: root.lang-en ? "Find existing session or server name..." : "查找已有会话或服务器名称...";
                                 color: Theme.text-muted;
                                 font-size: Theme.fs-md;
                                 vertical-alignment: center;
@@ -969,18 +969,18 @@ export component AppWindow inherits Window {
                             x: 70px;
                             y: 190px;
                             width: 580px;
-                            height: 96px;
+                            height: 68px;
                             background: Theme.bg-panel-alt;
                             VerticalLayout {
                                 padding-left: 22px;
                                 padding-right: 22px;
                                 padding-top: 9px;
-                                padding-bottom: 8px;
+                                padding-bottom: 9px;
                                 spacing: 8px;
                                 Text {
                                     height: 18px;
                                     width: parent.width;
-                                    text: "Recent sessions";
+                                    text: root.lang-en ? "Recent sessions" : "最近会话";
                                     color: Theme.text-primary;
                                     font-size: Theme.fs-md;
                                     font-weight: 700;
@@ -1022,14 +1022,6 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
-                                Text {
-                                    height: 18px;
-                                    width: parent.width;
-                                    text: "CygUtils plugin not found on your system.";
-                                    color: Theme.accent;
-                                    font-size: Theme.fs-sm;
-                                    horizontal-alignment: center;
-                                }
                             }
                         }
                     }
@@ -1053,6 +1045,7 @@ export component AppWindow inherits Window {
                     scroll-offset: term.scroll-offset;
                     is-alt-screen: term.is-alt-screen;
                     moba-mode: root.moba-mode;
+                    lang-en: root.lang-en;
                     find-matches: term.find-matches;
                     selection: term.selection;
                     sftp-panel-height <=> root.sftp-panel-height;

@@ -90,6 +90,7 @@ export component TerminalView inherits Rectangle {
     in property <[TermMatch]> find-matches; // search-highlight rectangles
     in property <[TermMatch]> selection;    // drag-selection highlight rectangles
     in property <bool> moba-mode: false;
+    in property <bool> lang-en: false;
 
     in property <string>  sftp-path: "/";
     in property <[SftpEntry]> sftp-entries;
@@ -277,6 +278,7 @@ export component TerminalView inherits Rectangle {
         if root.moba-mode : SftpPanel {
             width: root.moba-sftp-width;
             moba-mode:     true;
+            lang-en:       root.lang-en;
             moba-follow-cd: root.sftp-follow-cd;
             collapsed:     false;
             current-path:  root.sftp-path;
@@ -1199,6 +1201,7 @@ export component TerminalView inherits Rectangle {
             status:        root.sftp-status;
             loading:       root.sftp-loading;
             tree-nodes:    root.sftp-tree-nodes;
+            lang-en:       root.lang-en;
             selected-count: root.sftp-selected-count;
             toggle-collapsed => {
                 if (root.sftp-collapsed) {
