@@ -63,6 +63,8 @@ dark-light = "1"
 # in-app update check against the GitHub releases API (#48). Runs on a
 # background thread so it never blocks startup; failure is silently ignored.
 ureq = { version = "2", features = ["tls"] }
+# Cross-platform local shell PTY for the welcome-page "Start local terminal".
+portable-pty = "0.8"
 
 # Decode the embedded PNG icon to set the window icon at runtime (Linux only).
 # On Windows the icon comes from the .ico embedded by winresource at link time;

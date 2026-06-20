@@ -9,6 +9,7 @@ mod errlog;
 mod forward;
 mod i18n;
 mod known_hosts;
+mod local;
 mod proxy;
 mod serial;
 mod sftp;
@@ -65,7 +66,11 @@ fn init_tracing() {
     // ICU4X's data-error warnings (now routed through `log` → tracing, see the
     // icu_provider dependency) are pure noise — silence them on every layer.
     fn silence_icu(mut f: EnvFilter) -> EnvFilter {
-        for d in ["icu_provider=off", "icu_segmenter=off", "icu_normalizer=off"] {
+        for d in [
+            "icu_provider=off",
+            "icu_segmenter=off",
+            "icu_normalizer=off",
+        ] {
             if let Ok(dir) = d.parse() {
                 f = f.add_directive(dir);
             }
@@ -73,9 +78,8 @@ fn init_tracing() {
         f
     }
 
-    let env_filter = silence_icu(
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-    );
+    let env_filter =
+        silence_icu(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
     let stderr_layer = fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(env_filter);

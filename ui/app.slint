@@ -450,6 +450,8 @@ export component AppWindow inherits Window {
     callback tab-selected(string);
     callback tab-closed(string);
     callback new-tab-clicked();
+    callback start-local-terminal();
+    callback recover-previous-sessions();
     // Asks Rust to recompute the sidebar (status + resources) for whatever tab
     // is now active.  Fired on every active-tab change, UI- or code-driven.
     callback refresh-sidebar();
@@ -911,7 +913,7 @@ export component AppWindow inherits Window {
                                 background: start-local-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
                                 start-local-ta := TouchArea {
                                     mouse-cursor: pointer;
-                                    clicked => { root.new-tab-clicked(); }
+                                    clicked => { root.start-local-terminal(); }
                                 }
                                 HorizontalLayout {
                                     alignment: center;
@@ -925,7 +927,11 @@ export component AppWindow inherits Window {
                                 height: 32px;
                                 border-width: 1px;
                                 border-color: Theme.border-subtle;
-                                background: Theme.bg-panel;
+                                background: recover-prev-ta.has-hover ? Theme.bg-hover : Theme.bg-panel;
+                                recover-prev-ta := TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => { root.recover-previous-sessions(); }
+                                }
                                 HorizontalLayout {
                                     alignment: center;
                                     spacing: 8px;
